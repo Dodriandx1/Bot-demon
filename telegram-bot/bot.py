@@ -35,7 +35,7 @@ active_tasks: dict = {}
 last_updates: dict = {}
 download_queue: asyncio.Queue = asyncio.Queue()
 
-BOT_SIGNATURE = "✪ Bot By → @The_canst & @kaiser_yt"
+BOT_SIGNATURE = "✪ Bot By → @The_canst & @Ryota_YT"
 
 # ─── KEEP-ALIVE ──────────────────────────────────────────────────────────────
 def keep_alive():
@@ -216,9 +216,11 @@ async def upload_progress(current: int, total: int, msg: Message,
 
 # ─── SMART UPLOAD ────────────────────────────────────────────────────────────
 async def upload_smart_file(client: Client, message: Message, path: str,
-                             msg: Message, uname: str, task_id: str):
+                             msg: Message, uname: str, task_id: str,
+                             title: str = ""):
     fname = os.path.basename(path)
-    caption = f"✅ {fname}"
+    display = title.strip() if title.strip() else fname
+    caption = f"🎬 <b>{display}</b>\n\n{BOT_SIGNATURE}"
     lower = fname.lower()
     start_t = time.time()
 
@@ -231,6 +233,7 @@ async def upload_smart_file(client: Client, message: Message, path: str,
                 thumb=thumb,
                 supports_streaming=True,
                 caption=caption,
+                parse_mode="html",
                 progress=upload_progress,
                 progress_args=(msg, start_t, uname, task_id)
             )
@@ -239,6 +242,7 @@ async def upload_smart_file(client: Client, message: Message, path: str,
                 chat_id=message.chat.id,
                 document=path,
                 caption=caption,
+                parse_mode="html",
                 progress=upload_progress,
                 progress_args=(msg, start_t, uname, task_id)
             )
@@ -252,6 +256,7 @@ async def upload_smart_file(client: Client, message: Message, path: str,
             chat_id=message.chat.id,
             photo=path,
             caption=caption,
+            parse_mode="html",
             progress=upload_progress,
             progress_args=(msg, start_t, uname, task_id)
         )
@@ -261,6 +266,7 @@ async def upload_smart_file(client: Client, message: Message, path: str,
             chat_id=message.chat.id,
             audio=path,
             caption=caption,
+            parse_mode="html",
             progress=upload_progress,
             progress_args=(msg, start_t, uname, task_id)
         )
@@ -270,6 +276,7 @@ async def upload_smart_file(client: Client, message: Message, path: str,
             chat_id=message.chat.id,
             document=path,
             caption=caption,
+            parse_mode="html",
             progress=upload_progress,
             progress_args=(msg, start_t, uname, task_id)
         )
@@ -434,6 +441,7 @@ async def procesar_descarga(client: Client, message: Message,
 
     path = None
     encoded_path = None
+    video_title = ""
 
     try:
         # ── MEGA ──────────────────────────────────────────────────────────
@@ -473,6 +481,7 @@ async def procesar_descarga(client: Client, message: Message,
 
             if not path or not os.path.exists(path):
                 raise Exception("MEGA: archivo no encontrado tras la descarga.")
+            video_title = os.path.splitext(os.path.basename(path))[0]
 
         # ── MEDIAFIRE ─────────────────────────────────────────────────────
         elif is_mf:
@@ -487,6 +496,7 @@ async def procesar_descarga(client: Client, message: Message,
                 d_link = btn.get("href")
                 filename = d_link.split("/")[-1].split("?")[0]
                 path = os.path.join(DOWNLOAD_DIR, filename)
+                video_title = os.path.splitext(filename)[0]
 
                 start_t = time.time()
                 async with h.stream("GET", d_link) as resp:
@@ -519,6 +529,8 @@ async def procesar_descarga(client: Client, message: Message,
                             loop
                         )
 
+            captured = {"title": ""}
+
             def run_ydl():
                 opts = {
                     "outtmpl": f"{DOWNLOAD_DIR}{task_id}_%(playlist_index)s%(title)s.%(ext)s",
@@ -544,7 +556,9 @@ async def procesar_descarga(client: Client, message: Message,
                     opts["cookiefile"] = "cookies.txt"
 
                 with yt_dlp.YoutubeDL(opts) as ydl:
-                    ydl.extract_info(url, download=True)
+                    info = ydl.extract_info(url, download=True)
+                    if info:
+                        captured["title"] = info.get("title", "") or info.get("webpage_url_basename", "")
 
             await safe_edit(msg,
                 f"╭ Task By → 「{uname}」\n"
@@ -554,6 +568,7 @@ async def procesar_descarga(client: Client, message: Message,
                 f"{BOT_SIGNATURE}"
             )
             await asyncio.to_thread(run_ydl)
+            video_title = captured["title"]
 
             files = sorted(glob.glob(f"{DOWNLOAD_DIR}{task_id}_*"), key=os.path.getsize)
 
@@ -620,7 +635,7 @@ async def procesar_descarga(client: Client, message: Message,
             start_up = time.time()
             await safe_edit(msg, upload_panel(uname, 0, 0, os.path.getsize(path),
                                                0, 0, 0, task_id))
-            await upload_smart_file(client, message, path, msg, uname, task_id)
+            await upload_smart_file(client, message, path, msg, uname, task_id, title=video_title)
             try:
                 await msg.delete()
             except Exception:
