@@ -595,6 +595,7 @@ bot = Client("bot_session",
 # ─── /start ──────────────────────────────────────────────────────────────────
 @bot.on_message(filters.command("start"))
 async def cmd_start(client: Client, message: Message):
+    print(f"[CMD] /start recibido de {message.from_user.id}")
     uid = message.from_user.id
     name = message.from_user.first_name
     await message.reply_text(
@@ -710,10 +711,11 @@ async def handle_links(client: Client, message: Message):
 
 # ─── MAIN ────────────────────────────────────────────────────────────────────
 async def main():
-    await bot.start()
-    print("Bot iniciado ✓")
-    asyncio.create_task(queue_worker())
-    await asyncio.Event().wait()
+    async with bot:
+        me = await bot.get_me()
+        print(f"Bot iniciado ✓ — @{me.username} (ID: {me.id})")
+        asyncio.get_event_loop().create_task(queue_worker())
+        await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    bot.run(main())
