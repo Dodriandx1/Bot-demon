@@ -15,7 +15,7 @@ import re
 import platform
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
-from pyrogram import Client, filters
+from pyrogram import Client, filters, enums
 from pyrogram.types import Message, CallbackQuery
 from pyrogram.errors import MessageNotModified
 
@@ -233,7 +233,7 @@ async def upload_smart_file(client: Client, message: Message, path: str,
                 thumb=thumb,
                 supports_streaming=True,
                 caption=caption,
-                parse_mode="html",
+                parse_mode=enums.ParseMode.HTML,
                 progress=upload_progress,
                 progress_args=(msg, start_t, uname, task_id)
             )
@@ -242,7 +242,7 @@ async def upload_smart_file(client: Client, message: Message, path: str,
                 chat_id=message.chat.id,
                 document=path,
                 caption=caption,
-                parse_mode="html",
+                parse_mode=enums.ParseMode.HTML,
                 progress=upload_progress,
                 progress_args=(msg, start_t, uname, task_id)
             )
@@ -256,7 +256,7 @@ async def upload_smart_file(client: Client, message: Message, path: str,
             chat_id=message.chat.id,
             photo=path,
             caption=caption,
-            parse_mode="html",
+            parse_mode=enums.ParseMode.HTML,
             progress=upload_progress,
             progress_args=(msg, start_t, uname, task_id)
         )
@@ -266,7 +266,7 @@ async def upload_smart_file(client: Client, message: Message, path: str,
             chat_id=message.chat.id,
             audio=path,
             caption=caption,
-            parse_mode="html",
+            parse_mode=enums.ParseMode.HTML,
             progress=upload_progress,
             progress_args=(msg, start_t, uname, task_id)
         )
@@ -276,7 +276,7 @@ async def upload_smart_file(client: Client, message: Message, path: str,
             chat_id=message.chat.id,
             document=path,
             caption=caption,
-            parse_mode="html",
+            parse_mode=enums.ParseMode.HTML,
             progress=upload_progress,
             progress_args=(msg, start_t, uname, task_id)
         )
