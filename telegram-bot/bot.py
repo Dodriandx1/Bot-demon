@@ -524,25 +524,29 @@ async def procesar_descarga(client: Client, message: Message,
             captured_mega = {"title": ""}
 
             def run_mega_ydl():
+                # No login — public MEGA links work without credentials.
+                # Passing username/password causes MEGA API 402 errors.
                 opts = {
                     "outtmpl": f"{DOWNLOAD_DIR}{task_id}_%(title)s.%(ext)s",
                     "progress_hooks": [ydl_hook_mega],
                     "quiet": True,
                     "no_warnings": True,
+                    # Tell yt-dlp to skip MEGA's streaming API and use direct link
+                    "extractor_args": {"mega": {"formats": ["best"]}},
                 }
-                if MEGA_EMAIL and MEGA_PASSWORD:
-                    opts["username"] = MEGA_EMAIL
-                    opts["password"] = MEGA_PASSWORD
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     info = ydl.extract_info(url, download=True)
                     if info:
-                        captured_mega["title"] = info.get("title", "") or info.get("webpage_url_basename", "")
+                        captured_mega["title"] = (
+                            info.get("title", "")
+                            or info.get("webpage_url_basename", "")
+                        )
 
             await asyncio.to_thread(run_mega_ydl)
 
             files = glob.glob(f"{DOWNLOAD_DIR}{task_id}_*")
             if not files:
-                raise Exception("MEGA: no se pudo descargar. Verifica que el enlace sea público o las credenciales sean correctas.")
+                raise Exception("MEGA: no se pudo descargar el archivo. Asegúrate que el enlace sea público y no haya caducado.")
             path = max(files, key=os.path.getctime)
             video_title = captured_mega["title"] or os.path.splitext(os.path.basename(path))[0]
 
