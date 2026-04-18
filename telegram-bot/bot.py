@@ -446,8 +446,11 @@ async def procesar_descarga(client: Client, message: Message,
     try:
         # ── MEGA ──────────────────────────────────────────────────────────
         if is_mega:
-            engine = "megatools"
+            engine = "yt-dlp"
             mode = "#MEGA"
+            start_t = time.time()
+            loop = asyncio.get_running_loop()
+
             await safe_edit(msg,
                 f"╭ Task By → 「{uname}」\n"
                 f"┊ [{make_bar(0)}] 0.00%\n"
@@ -456,32 +459,41 @@ async def procesar_descarga(client: Client, message: Message,
                 f"{BOT_SIGNATURE}"
             )
 
-            mega_cmd = (
-                f"megadl --username '{MEGA_EMAIL}' --password '{MEGA_PASSWORD}'"
-                f" --path '{DOWNLOAD_DIR}' '{url}'"
-            )
-            proc = await asyncio.create_subprocess_shell(
-                mega_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await proc.communicate()
-            out = stdout.decode()
+            def ydl_hook_mega(d):
+                if d["status"] == "downloading":
+                    curr  = d.get("downloaded_bytes", 0)
+                    total = d.get("total_bytes") or d.get("total_bytes_estimate", 0)
+                    if total > 0:
+                        asyncio.run_coroutine_threadsafe(
+                            download_progress(curr, total, msg, start_t,
+                                              uname, task_id, engine, mode),
+                            loop
+                        )
 
-            if proc.returncode != 0:
-                raise Exception(f"MEGA error: {stderr.decode()[:150]}")
+            captured_mega = {"title": ""}
 
-            match = re.search(r"Downloaded (.*)", out)
-            if match:
-                path = os.path.join(DOWNLOAD_DIR, match.group(1).strip())
-            else:
-                files = glob.glob(f"{DOWNLOAD_DIR}*")
-                if files:
-                    path = max(files, key=os.path.getctime)
+            def run_mega_ydl():
+                opts = {
+                    "outtmpl": f"{DOWNLOAD_DIR}{task_id}_%(title)s.%(ext)s",
+                    "progress_hooks": [ydl_hook_mega],
+                    "quiet": True,
+                    "no_warnings": True,
+                }
+                if MEGA_EMAIL and MEGA_PASSWORD:
+                    opts["username"] = MEGA_EMAIL
+                    opts["password"] = MEGA_PASSWORD
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    if info:
+                        captured_mega["title"] = info.get("title", "") or info.get("webpage_url_basename", "")
 
-            if not path or not os.path.exists(path):
-                raise Exception("MEGA: archivo no encontrado tras la descarga.")
-            video_title = os.path.splitext(os.path.basename(path))[0]
+            await asyncio.to_thread(run_mega_ydl)
+
+            files = glob.glob(f"{DOWNLOAD_DIR}{task_id}_*")
+            if not files:
+                raise Exception("MEGA: no se pudo descargar. Verifica que el enlace sea público o las credenciales sean correctas.")
+            path = max(files, key=os.path.getctime)
+            video_title = captured_mega["title"] or os.path.splitext(os.path.basename(path))[0]
 
         # ── MEDIAFIRE ─────────────────────────────────────────────────────
         elif is_mf:
