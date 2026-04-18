@@ -1,0 +1,589 @@
+Puedes hacer un bot de telegram para descargar videos de redes sociales y todas los descargadores que cuando le envié un enlace  empiece a descargar el anime con una barra de descarga como está 
+‎
+‎
+‎╭ Task By → 「𝓗𝓪𝓻𝓾𝓽𝓸 」
+‎┊ [⬢⬢⬢⬢◉◌◌◌◌◌◌◌] 36.62%
+‎┊ Status   : Download
+‎┊ Done     : 130 / 355 partes
+‎┊ Total    : 355 partes
+‎┊ Speed    : 92.50 MB/s
+‎┊ ETA      : 8s
+‎┊ Past     : 4s
+‎┊ Engine   : CRDWV2
+‎╰ Mode     : #CRDW
+‎⋗ Stop : /cl_8857585
+‎
+‎✪ Bot By → @The_canst & @kaiser_yt
+‎
+‎Despues de descargar el video salga una barra donde diga que está codificando el video  la barra será Haci 
+‎
+‎╭ Task By → 「𝓗𝓪𝓻𝓾𝓽𝓸 」
+‎┊ [◉◌◌◌◌◌◌◌◌◌◌◌] 3.25%
+‎┊ Status   : Encoding
+‎┊ Done     : 0.05 KB
+‎┊ Total    : 0.05 KB
+‎┊ Speed    : 279.31 fps
+‎┊ ETA      : 1m 58s
+‎┊ Past     : 4s
+‎┊ Engine   : HandBrake
+‎╰ Mode     : #HB
+‎⋗ Stop : /cl_9178829
+‎
+‎✪ Bot By → @The_canst & @kaiser_yt
+‎
+‎despues de aver codificado el video salga una barra de subida que indique que el video se está subiendo tipo Haci
+‎
+‎
+‎╭ Task By → 「𝓗𝓪𝓻𝓾𝓽𝓸 」
+‎┊ [⬢⬢⬢◉◌◌◌◌◌◌◌◌] 25.47%
+‎┊ Status   : Upload
+‎┊ Done     : 36.50MB
+‎┊ Total    : 143.29MB
+‎┊ Speed    : 9.66MB/s
+‎┊ ETA      : 11s
+‎┊ Past     : 3s
+‎┊ Engine   : Pyrogram
+‎╰ Mode     : #TLGUP
+‎⋗ Stop : /cl_9178829
+‎
+‎✪ Bot By → @The_canst & @kaiser_yt
+‎
+‎Sierto en cada mensaje de barra de descarga en la de codificando el video y subiendo en video que sea un solo mensaje pero que se valla editando en tiempo real según el proceso indicado y después de que el video se suba borra la barra de subida 
+‎
+‎Tambien que después de las palabras 
+‎Task By →de cada barra de descarga codificando y subiendo salga el nombre de quien envío el enlace 
+‎
+‎Y que después de la palabra ⋗ Stop : salga el comando /cancel para cancelar la descarga 
+‎
+‎Tambien añade los comando
+‎/Stat para ver el panel de estadística del bot usa este ejemplo 
+‎
+‎╭─ Status Panel 
+‎┊ 🕐 Time on  : 
+‎┊ 🧠 RAM      : 
+‎┊ 💾 Storage  : 
+‎┊ 🖥️ Server   : 
+‎┊ ⚙️ Platform :
+‎┊ 🔧 CPU      : 
+‎╰─ Engine    : 
+‎
+‎✪ Bot By → @The_canst & @kaiser_yt
+‎
+‎Añade el comando /reset para reiniciar las estadísticas del bot que salga una barra tipo Haci 
+‎
+‎╭─「 Reset Completado ✅ 」
+‎┊ 🔄 Estado    : Online
+‎┊ 🕐 Uptime    : 0s
+‎┊ 🧹 Liberado  : Nada que limpiar
+‎┊ ⛔ Descargas : Canceladas
+‎╰─ Engine     : CRDWV2
+‎
+‎✪ Bot By → @The_canst & @kaiser_yt
+‎
+te dare un codigo de un bot quiero que lo implementes para que no tenga fallas 
+import os
+import sys
+import time
+import asyncio
+import subprocess
+import psutil
+import httpx
+import pymongo
+import gc 
+import yt_dlp
+import glob 
+import http.server
+import socketserver
+import threading
+import re 
+from datetime import datetime, timedelta
+from bs4 import BeautifulSoup
+from pyrogram import Client, filters, enums
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, InputMediaPhoto, InputMediaVideo
+from pyrogram.errors import MessageNotModified
+
+# --- SERVIDOR KEEP-ALIVE PARA RENDER ---
+def keep_alive():
+    """Servidor web simple para que Render no apague el bot"""
+    class HealthCheckHandler(http.server.SimpleHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"Bot is Running")
+
+    port = int(os.environ.get("PORT", 8000))
+    with socketserver.TCPServer(("", port), HealthCheckHandler) as httpd:
+        print(f"Servidor Keep-Alive activo en el puerto {port}")
+        httpd.serve_forever()
+
+threading.Thread(target=keep_alive, daemon=True).start()
+
+# --- CONFIGURACIÓN ---
+os.environ['HOME'] = '/tmp'
+DOWNLOAD_DIR = "/tmp/downloads/"
+if not os.path.exists(DOWNLOAD_DIR):
+    os.makedirs(DOWNLOAD_DIR, mode=0o777, exist_ok=True)
+
+
+active_tasks = {} 
+last_updates = {} 
+
+# --- NUEVO: COLA DE DESCARGAS GLOBAL ---
+download_queue = asyncio.Queue()
+
+bot = Client("my_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+
+# --- BASE DE DATOS ---
+db_connected = False
+try:
+    db_client = pymongo.MongoClient(MONGO_URI, serverSelectionTimeoutMS=2000)
+    users_col = db_client['bot_mediafire']['authorized_users']
+    db_client.server_info()
+    db_connected = True
+except: pass
+
+# --- UTILIDADES ---
+def is_authorized(user_id):
+    if user_id in ADMIN_IDS: return True
+    if db_connected:
+        try: return users_col.find_one({"user_id": user_id}) is not None
+        except: return False
+    return False
+
+def get_readable_size(size):
+    if size is None: return "0B"
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if size < 1024: return f"{size:.2f}{unit}"
+        size /= 1024
+    return "0B"
+
+def extract_thumbnail(video_path):
+    v_path = str(video_path)
+    thumb_path = v_path + ".jpg"
+    try:
+        subprocess.run(['ffmpeg', '-i', v_path, '-ss', '00:00:02', '-vframes', '1', thumb_path, '-y'], 
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        return thumb_path
+    except: return None
+
+async def safe_edit(msg, text, reply_markup=None):
+    """Edita el mensaje de forma segura para evitar crashes de Telegram [400 MESSAGE_NOT_MODIFIED]"""
+    try:
+        await msg.edit_text(text, reply_markup=reply_markup)
+    except MessageNotModified:
+        pass 
+    except Exception:
+        pass 
+
+# --- PANEL DE PROGRESO ---
+async def progress_callback(current, total, msg, start_t, status, uname, uid, mode, task_id):
+    if active_tasks.get(task_id) == "CANCELLED":
+        raise Exception("USER_CANCELLED")
+    
+    now = time.time()
+    last_upd = last_updates.get(task_id, 0)
+    
+    if now - last_upd < 3 and current < total: 
+        return
+        
+    last_updates[task_id] = now
+    diff = now - start_t
+    percentage = int((current * 100 / total)) if total > 0 else 0
+    speed = f"{get_readable_size(current / diff)}/s" if diff > 0 else "0B/s"
+    
+    bar = "█" * int(percentage / 5) + "░" * (20 - int(percentage / 5))
+    
+    panel = (
+        f"<b>📥 {status}</b>\n"
+        f"<code>[{bar}]</code> {percentage}%\n"
+        f"<b>Processed</b> → {get_readable_size(current)} of {get_readable_size(total)}\n"
+        f"<b>Speed</b> → {speed}\n"
+        f"<b>Time</b> → {int(diff)}s\n"
+        f"<b>In Mode</b> → {mode}\n"
+        f"<b>Task By</b> → ⌈ <b>{uname}</b> ⌋ | #ID{uid}\n\n"
+        f"✪ <b>Bot By</b> → @dodriandx"
+    )
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancelar", callback_data=f"cancel_{task_id}")]])
+    await safe_edit(msg, panel, reply_markup=markup)
+
+# --- FUNCIÓN DE SUBIDA INTELIGENTE ---
+async def upload_smart_file(client, message, path, msg, uname, uid, mode, task_id):
+    """Sube el archivo detectando automáticamente su formato para que se vea correctamente"""
+    filename_lower = os.path.basename(str(path)).lower()
+    clean_caption = f"✅ <b>{os.path.basename(str(path))}</b>"
+
+    if filename_lower.endswith(('.mp4', '.mkv', '.webm', '.avi')):
+        await safe_edit(msg, "🎞️ <b>Subiendo video...</b>")
+        thumb = extract_thumbnail(path)
+        try:
+            await client.send_video(
+                chat_id=message.chat.id,
+                video=str(path),
+                thumb=thumb,
+                supports_streaming=True,
+                caption=clean_caption,
+                progress=progress_callback,
+                progress_args=(msg, time.time(), "Uploading", uname, uid, mode, task_id)
+            )
+        except Exception:
+            # Respaldo si falla el formato de video
+            await client.send_document(
+                chat_id=message.chat.id, document=str(path), caption=clean_caption,
+                progress=progress_callback, progress_args=(msg, time.time(), "Uploading", uname, uid, mode, task_id)
+            )
+            
+    elif filename_lower.endswith(('.jpg', '.jpeg', '.png', '.webp')):
+        await safe_edit(msg, "🖼️ <b>Subiendo imagen...</b>")
+        await client.send_photo(
+            chat_id=message.chat.id, photo=str(path), caption=clean_caption,
+            progress=progress_callback, progress_args=(msg, time.time(), "Uploading", uname, uid, mode, task_id)
+        )
+        
+    elif filename_lower.endswith(('.mp3', '.m4a', '.wav', '.flac', '.ogg')):
+        await safe_edit(msg, "🎵 <b>Subiendo audio...</b>")
+        await client.send_audio(
+            chat_id=message.chat.id, audio=str(path), caption=clean_caption,
+            progress=progress_callback, progress_args=(msg, time.time(), "Uploading", uname, uid, mode, task_id)
+        )
+        
+    else:
+        await safe_edit(msg, "📁 <b>Subiendo archivo...</b>")
+        await client.send_document(
+            chat_id=message.chat.id, document=str(path), caption=clean_caption,
+            progress=progress_callback, progress_args=(msg, time.time(), "Uploading", uname, uid, mode, task_id)
+        )
+
+# --- COMANDOS ---
+@bot.on_callback_query(filters.regex("^cancel_"))
+async def handle_cancel(client, callback_query: CallbackQuery):
+    task_id = callback_query.data.split("_")[1]
+    active_tasks[task_id] = "CANCELLED"
+    await callback_query.answer("🛑 Cancelando...", show_alert=True)
+
+@bot.on_message(filters.command("start"))
+async def start_cmd(client, message):
+    uid = message.from_user.id
+    status = "✅ Autorizado" if is_authorized(uid) else "❌ No Autorizado"
+    start_panel = (
+        f"🚀 ¡Hola! <b>{message.from_user.first_name}</b>\n"
+        f"Descargador (Mega, Mediafire, TikTok, YouTube, Instagram, etc)💾\n\n"
+        f"🆔 Tu ID: <code>{uid}</code>\n"
+        f"⚡ Estado: {status}\n\n"
+        f"👤 Contacta con mi creador\n\n"
+        f"<blockquote>@Dodriandx</blockquote>"
+    )
+    await message.reply_text(start_panel)
+
+@bot.on_message(filters.command("ping"))
+async def ping_cmd(client, message):
+    uptime = str(timedelta(seconds=int(time.time() - start_time)))
+    cpu = psutil.cpu_percent()
+    ram = psutil.virtual_memory()
+    status_text = (
+        f"🚀 <b>Estado del Servidor </b>\n\n"
+        f"⏱️ <b>Uptime:</b> {uptime}\n"
+        f"📟 <b>Procesador:</b> {cpu}%\n"
+        f"🧠 <b>RAM:</b> {ram.percent}% ({get_readable_size(ram.used)}/{get_readable_size(ram.total)})\n"
+        f"📡 <b>OS:</b> Linux"
+    )
+    await message.reply_text(status_text)
+
+@bot.on_message(filters.command("reset", prefixes=[".", "/"]))
+async def reset_bot(client, message):
+    if message.from_user.id not in ADMIN_IDS:
+        return await message.reply_text("❌ Sin permisos.")
+    await message.reply_text("♻️ <b>Reiniciando sistema y liberando RAM...</b>")
+    os.execl(sys.executable, sys.executable, *sys.argv)
+
+@bot.on_message(filters.command("update", prefixes=[".", "/"]))
+async def update_bot(client, message):
+    if message.from_user.id not in ADMIN_IDS:
+        return await message.reply_text("❌ Sin permisos.")
+    
+    msg = await message.reply_text("🔄 <b>Actualizando yt-dlp...</b>\nEsto puede tardar unos segundos.")
+    
+    try:
+        process = await asyncio.create_subprocess_shell(
+            f"{sys.executable} -m pip install -U yt-dlp",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
+        
+        if process.returncode == 0:
+            await msg.edit_text("✅ <b>yt-dlp actualizado correctamente.</b>\n♻️ Reiniciando el sistema para aplicar los cambios...")
+            os.execl(sys.executable, sys.executable, *sys.argv)
+        else:
+            error_output = stderr.decode('utf-8')
+            await msg.edit_text(f"❌ <b>Error al actualizar:</b>\n<code>{error_output[:500]}</code>")
+    except Exception as e:
+        await msg.edit_text(f"❌ <b>Excepción durante la actualización:</b> {str(e)}")
+
+# --- FUNCIÓN EXACTA DE DESCARGA ORIGINAL EXTRAÍDA PARA EL WORKER ---
+async def procesar_descarga(client, message, url_to_download, uname, uid, queue_info):
+    # 1. DICCIONARIO DE DOMINIOS ESPEJO
+    mirrors = {
+        "flashwish.com": "streamwish.com", "callistanise.com": "vidhide.com",
+        "swishdesu.com": "streamwish.com", "filelions.com": "streamwish.com",
+        "filelions.to": "streamwish.com", "vidhidepro.com": "vidhide.com",
+        "vidhideplus.com": "vidhide.com"
+    }
+    for mirror, main_domain in mirrors.items():
+        if mirror in url_to_download.lower():
+            url_to_download = url_to_download.replace(mirror, main_domain)
+            break
+            
+    # Lista ampliada de servidores
+    VIDEO_HOSTS = ["streamwish", "voe", "vidhide", "filemoon", "mixdrop", "mp4upload", "streamtape", "flashwish", "callistanise", "filelions", "swishdesu"]
+    
+    is_mega = "mega.nz" in url_to_download
+    is_mf = "mediafire.com" in url_to_download
+    is_video_host = any(host in url_to_download.lower() for host in VIDEO_HOSTS)
+    is_social = url_to_download.startswith("http") and not is_mega and not is_mf and not is_video_host
+
+    if is_mega or is_mf or is_video_host or is_social:
+        task_id = str(int(time.time())) + str(queue_info)
+        active_tasks[task_id] = "RUNNING"
+        msg = await message.reply_text(f"🔄 <b>{queue_info}</b> | ⏳ <b>Analizando enlace...</b>")
+        path, thumb = None, None
+        
+        try:
+            # --- MEGA --- (Optimizado con megatools)
+            if is_mega:
+                mode = "#Mega"
+                await safe_edit(msg, f"🔄 <b>{queue_info}</b> | 📥 <b>Descargando de MEGA a máxima velocidad...</b>")
+                
+                # Ejecutamos megadl asíncronamente con la ruta de destino
+                comando = f"megadl --path '{DOWNLOAD_DIR}' '{url_to_download}'"
+                
+                proceso = await asyncio.create_subprocess_shell(
+                    comando,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                
+                # Esperamos a que termine la descarga sin bloquear el bot
+                stdout, stderr = await proceso.communicate()
+                salida = stdout.decode()
+                errores = stderr.decode()
+
+                path = None
+                if proceso.returncode == 0:
+                    # megadl imprime el nombre en consola: "Downloaded archivo.ext"
+                    match = re.search(r'Downloaded (.*)', salida)
+                    if match:
+                        nombre_archivo = match.group(1).strip()
+                        path = os.path.join(DOWNLOAD_DIR, nombre_archivo)
+                    else:
+                        # Sistema de respaldo: si falla el regex, toma el archivo más reciente en descargas
+                        archivos = glob.glob(f"{DOWNLOAD_DIR}*")
+                        if archivos:
+                            path = max(archivos, key=os.path.getctime)
+                else:
+                    raise Exception(f"MEGA limitó la IP o enlace caído: {errores[:100]}")
+
+                if path and os.path.exists(str(path)):
+                    await upload_smart_file(client, message, path, msg, uname, uid, mode, task_id)
+                    await msg.delete()
+
+            # --- MEDIAFIRE ---
+            elif is_mf:
+                mode = "#MediaFire"
+                async with httpx.AsyncClient(timeout=100.0) as h_client:
+                    r = await h_client.get(url_to_download, follow_redirects=True)
+                    soup = BeautifulSoup(r.text, 'html.parser')
+                    btn = soup.find('a', {'id': 'downloadButton'})
+                    if not btn: raise Exception("Archivo no encontrado.")
+                    d_link = btn.get('href')
+                    path = os.path.join(DOWNLOAD_DIR, d_link.split('/')[-1])
+                    
+                    start_t = time.time()
+                    async with h_client.stream("GET", d_link) as resp:
+                        total = int(resp.headers.get('content-length', 0))
+                        with open(path, 'wb') as f:
+                            curr = 0
+                            async for chunk in resp.aiter_bytes():
+                                if active_tasks.get(task_id) == "CANCELLED": raise Exception("USER_CANCELLED")
+                                f.write(chunk)
+                                curr += len(chunk)
+                                await progress_callback(curr, total, msg, start_t, "Downloading", uname, uid, mode, task_id)
+                
+                if path and os.path.exists(str(path)):
+                    await upload_smart_file(client, message, path, msg, uname, uid, mode, task_id)
+                    await msg.delete()
+
+            # --- REDES SOCIALES Y SERVIDORES DE VIDEO ---
+            elif is_social or is_video_host:
+                mode = "#VideoHoster" if is_video_host else "#SocialMedia"
+                start_t = time.time()
+                loop = asyncio.get_running_loop()
+
+                def ydl_hook(d):
+                    if d['status'] == 'downloading':
+                        curr = d.get('downloaded_bytes', 0)
+                        total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
+                        if total > 0:
+                            asyncio.run_coroutine_threadsafe(
+                                progress_callback(curr, total, msg, start_t, "Downloading", uname, uid, mode, task_id), loop
+                            )
+
+                def download_media():
+                    ydl_opts = {
+                        'outtmpl': f'{DOWNLOAD_DIR}{task_id}_%(playlist_index)s_%(title)s.%(ext)s',
+                        'noplaylist': False,  
+                        'progress_hooks': [ydl_hook],
+                        'quiet': True,
+                    }
+                    
+                    if is_video_host:
+                        ydl_opts['format'] = 'best' 
+                        ydl_opts['http_headers'] = {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                            'Accept-Language': 'en-US,en;q=0.9,es;q=0.8',
+                            'Sec-Fetch-Mode': 'navigate',
+                            'Referer': url_to_download
+                        }
+                    else:
+                        ydl_opts['format'] = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
+
+                    if os.path.exists("cookies.txt"):
+                        ydl_opts['cookiefile'] = 'cookies.txt'
+
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        ydl.extract_info(url_to_download, download=True)
+                        return True
+
+                await safe_edit(msg, f"🔄 <b>{queue_info}</b> | 📥 <b>Extrayendo desde {mode}...</b>")
+                await asyncio.to_thread(download_media)
+
+                downloaded_files = glob.glob(f"{DOWNLOAD_DIR}{task_id}_*")
+
+                if not downloaded_files:
+                    raise Exception("No se pudo extraer el contenido. Posible bloqueo de IP.")
+
+                if len(downloaded_files) > 1:
+                    await safe_edit(msg, f"🔄 <b>{queue_info}</b> | 📸 <b>Subiendo carrusel/álbum...</b>")
+                    media_group = []
+                    for f in downloaded_files:
+                        if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
+                            media_group.append(InputMediaPhoto(f))
+                        elif f.lower().endswith(('.mp4', '.mkv')):
+                            media_group.append(InputMediaVideo(f))
+                    
+                    for i in range(0, len(media_group), 10):
+                        await client.send_media_group(
+                            chat_id=message.chat.id,
+                            media=media_group[i:i+10]
+                        )
+                    await msg.delete()
+                else:
+                    path = downloaded_files[0]
+                    await upload_smart_file(client, message, path, msg, uname, uid, mode, task_id)
+                    await msg.delete()
+
+        except Exception as e:
+            err_msg = "🛑 Tarea cancelada por el usuario." if "USER_CANCELLED" in str(e) else f"❌ Error: {str(e)[:100]}"
+            await safe_edit(msg, f"🔄 <b>{queue_info}</b> | {err_msg}")
+        finally:
+            active_tasks.pop(task_id, None)
+            
+            # Limpieza
+            for f in glob.glob(f"{DOWNLOAD_DIR}{task_id}_*"):
+                try: os.remove(f)
+                except: pass
+            if 'path' in locals() and path and os.path.exists(str(path)): 
+                try: os.remove(str(path))
+                except: pass
+            if 'thumb' in locals() and thumb and os.path.exists(str(thumb)): 
+                try: os.remove(str(thumb))
+                except: pass
+            gc.collect()
+
+# --- WORKER QUE ATIENDE LA COLA 1 POR 1 EN SEGUNDO PLANO ---
+async def queue_worker():
+    print("👷 Worker de descargas activo y esperando links...")
+    while True:
+        # Se queda pausado aquí hasta que llegue un link a la cola
+        tarea = await download_queue.get()
+        client, message, url, uname, uid, queue_info = tarea
+        
+        try:
+            await procesar_descarga(client, message, url, uname, uid, queue_info)
+        except Exception as e:
+            print(f"Error procesando en cola: {e}")
+        finally:
+            # Libera el espacio en la cola para procesar el siguiente
+            download_queue.task_done()
+
+# --- RECEPTOR DE LINKS (Solo mete a la cola) ---
+@bot.on_message(filters.text & ~filters.command(["start", "ping", "reset", "update"]))
+async def handle_links(client, message):
+    uid = message.from_user.id
+    uname = message.from_user.first_name
+    if not is_authorized(uid): return
+    
+    # Extrae todos los links usando la expresión regular
+    urls = re.findall(r'(https?://[^\s]+)', message.text.strip())
+    
+    if not urls: 
+        return
+
+    # Mete cada link encontrado a la cola global
+    for i, url in enumerate(urls, 1):
+        queue_info = f"Cola: {i}/{len(urls)}"
+        await download_queue.put((client, message, url, uname, uid, queue_info))
+    
+    # Aviso para el usuario
+    if len(urls) == 1:
+        await message.reply_text(f"📥 <b>Enlace añadido a la cola.</b>\n🚦 Tareas en espera: {download_queue.qsize()}")
+    else:
+        await message.reply_text(f"📥 <b>{len(urls)} enlaces añadidos a la cola.</b>\n🚦 Total de tareas en espera: {download_queue.qsize()}")
+
+# --- ARRANQUE PRINCIPAL ---
+if __name__ == "__main__":
+    print("Iniciando Bot...")
+    # Iniciar el worker de la cola justo antes del bot
+    loop = asyncio.get_event_loop()
+    loop.create_task(queue_worker())
+    
+    bot.run() y manten el panel que te di primero de las descargas , y las estadisticas 
+pyrogram
+tgcrypto
+mega.py
+httpx
+beautifulsoup4
+pymongo
+psutil
+hachoir
+yt-dlp usa esas dependencias que te di , un .env MEGA_EMAIL=armando24adrian@gmail.com
+MEGA_PASSWORD=D4!QpK:WNvFNM3c para mega , de dockerfile FROM python:3.10-slim
+
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    gcc \
+    python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y megatools
+
+RUN mkdir -p /tmp/downloads && chmod 777 /tmp/downloads
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+CMD ["python", "bot.py"]  del render-build-sh #!/usr/bin/env bash
+# exit on error
+set -o errexit
+
+pip install -r requirements.txt
+
+# Descargar FFmpeg manualmente
+mkdir -p ffmpeg
+cd ffmpeg
+wget https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
+tar xvf ffmpeg-release-amd64-static.tar.xz --strip-components=1
+export PATH=$PATH:$(pwd)
+cd ..
