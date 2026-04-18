@@ -102,6 +102,38 @@ def extract_thumbnail(video_path: str):
     except Exception:
         return None
 
+def get_video_meta(video_path: str) -> dict:
+    """Get width, height, duration for send_video."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=width,height",
+                "-show_entries", "format=duration",
+                "-of", "csv=p=0",
+                video_path,
+            ],
+            capture_output=True, text=True, timeout=10
+        )
+        lines = [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
+        width, height, duration = 0, 0, 0
+        for line in lines:
+            parts = line.split(",")
+            if len(parts) == 2:
+                try:
+                    width, height = int(parts[0]), int(parts[1])
+                except ValueError:
+                    pass
+            elif len(parts) == 1:
+                try:
+                    duration = int(float(parts[0]))
+                except ValueError:
+                    pass
+        return {"width": width, "height": height, "duration": duration}
+    except Exception:
+        return {"width": 0, "height": 0, "duration": 0}
+
 async def safe_edit(msg: Message, text: str):
     try:
         await msg.edit_text(text, parse_mode=None)
@@ -226,26 +258,45 @@ async def upload_smart_file(client: Client, message: Message, path: str,
 
     if lower.endswith((".mp4", ".mkv", ".webm", ".avi", ".mov")):
         thumb = extract_thumbnail(path)
+        meta  = get_video_meta(path)
         try:
             await client.send_video(
                 chat_id=message.chat.id,
                 video=path,
                 thumb=thumb,
                 supports_streaming=True,
+                width=meta["width"] or None,
+                height=meta["height"] or None,
+                duration=meta["duration"] or None,
                 caption=caption,
                 parse_mode=enums.ParseMode.HTML,
                 progress=upload_progress,
                 progress_args=(msg, start_t, uname, task_id)
             )
-        except Exception:
-            await client.send_document(
-                chat_id=message.chat.id,
-                document=path,
-                caption=caption,
-                parse_mode=enums.ParseMode.HTML,
-                progress=upload_progress,
-                progress_args=(msg, start_t, uname, task_id)
-            )
+        except Exception as e:
+            print(f"[upload] send_video failed ({e}), retrying without meta...")
+            try:
+                await client.send_video(
+                    chat_id=message.chat.id,
+                    video=path,
+                    thumb=thumb,
+                    supports_streaming=True,
+                    caption=caption,
+                    parse_mode=enums.ParseMode.HTML,
+                    progress=upload_progress,
+                    progress_args=(msg, start_t, uname, task_id)
+                )
+            except Exception as e2:
+                print(f"[upload] send_video retry failed ({e2}), sending as document")
+                await client.send_document(
+                    chat_id=message.chat.id,
+                    document=path,
+                    thumb=thumb,
+                    caption=caption,
+                    parse_mode=enums.ParseMode.HTML,
+                    progress=upload_progress,
+                    progress_args=(msg, start_t, uname, task_id)
+                )
         finally:
             if thumb and os.path.exists(thumb):
                 try: os.remove(thumb)
