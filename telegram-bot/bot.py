@@ -87,10 +87,18 @@ def extract_thumbnail(video_path: str):
     thumb = video_path + ".jpg"
     try:
         subprocess.run(
-            ["ffmpeg", "-i", video_path, "-ss", "00:00:02", "-vframes", "1", thumb, "-y"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
+            [
+                "ffmpeg", "-i", video_path,
+                "-ss", "00:00:01",
+                "-vframes", "1",
+                "-vf", "scale=320:-1",
+                "-q:v", "2",
+                thumb, "-y"
+            ],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=15, check=True
         )
-        return thumb
+        return thumb if os.path.exists(thumb) else None
     except Exception:
         return None
 
@@ -266,27 +274,85 @@ async def upload_smart_file(client: Client, message: Message, path: str,
             progress_args=(msg, start_t, uname, task_id)
         )
 
+# ─── PROBE VIDEO INFO ────────────────────────────────────────────────────────
+def probe_video(input_path: str) -> dict:
+    """Returns dict with 'codec', 'duration', 'audio_codec'."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=codec_name",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                input_path,
+            ],
+            capture_output=True, text=True
+        )
+        lines = [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
+        codec = lines[0] if lines else "unknown"
+        duration = float(lines[1]) if len(lines) > 1 else 0.0
+
+        audio = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "a:0",
+                "-show_entries", "stream=codec_name",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                input_path,
+            ],
+            capture_output=True, text=True
+        )
+        audio_codec = audio.stdout.strip().splitlines()[0].strip() if audio.stdout.strip() else "unknown"
+        return {"codec": codec, "duration": duration, "audio_codec": audio_codec}
+    except Exception:
+        return {"codec": "unknown", "duration": 0.0, "audio_codec": "unknown"}
+
 # ─── ENCODE HELPER ───────────────────────────────────────────────────────────
 async def encode_video(input_path: str, output_path: str,
                         msg: Message, uname: str, task_id: str) -> bool:
-    """Re-encode with ffmpeg while showing encoding panel (edits the same msg)."""
-    try:
-        probe = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", input_path],
-            capture_output=True, text=True
-        )
-        total_dur = float(probe.stdout.strip() or "0")
-    except Exception:
-        total_dur = 0
+    """
+    Smart encode:
+      • H.264 + AAC/MP3  → remux only (stream copy, near-instant)
+      • H.264 + other audio → copy video, re-encode audio only (fast)
+      • Other codec      → full re-encode with ultrafast preset (fastest possible)
+    """
+    info = await asyncio.to_thread(probe_video, input_path)
+    codec       = info["codec"]
+    total_dur   = info["duration"]
+    audio_codec = info["audio_codec"]
+    input_size  = os.path.getsize(input_path)
 
-    cmd = [
-        "ffmpeg", "-i", input_path,
-        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-        "-c:a", "aac", "-b:a", "128k",
-        "-progress", "pipe:1", "-nostats",
-        "-y", output_path
-    ]
+    # Decide strategy
+    is_h264 = codec == "h264"
+    is_aac_compat = audio_codec in ("aac", "mp3", "mp4a")
+
+    if is_h264 and is_aac_compat:
+        # ── Remux only: copy everything, no re-encode ──────────────────────
+        cmd = ["ffmpeg", "-i", input_path,
+               "-c:v", "copy", "-c:a", "copy",
+               "-movflags", "+faststart",
+               "-y", output_path]
+        engine_label = "Remux (stream copy)"
+    elif is_h264:
+        # ── Copy video, re-encode audio only ──────────────────────────────
+        cmd = ["ffmpeg", "-i", input_path,
+               "-c:v", "copy",
+               "-c:a", "aac", "-b:a", "128k",
+               "-movflags", "+faststart",
+               "-y", output_path]
+        engine_label = "Copy+AAC"
+    else:
+        # ── Full re-encode with ultrafast preset ──────────────────────────
+        cmd = ["ffmpeg", "-i", input_path,
+               "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+               "-c:a", "aac", "-b:a", "128k",
+               "-movflags", "+faststart",
+               "-progress", "pipe:1", "-nostats",
+               "-y", output_path]
+        engine_label = "libx264 ultrafast"
+
+    print(f"[encode] codec={codec} audio={audio_codec} → {engine_label}")
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -295,9 +361,6 @@ async def encode_video(input_path: str, output_path: str,
     )
 
     start_t = time.time()
-    done_bytes = os.path.getsize(input_path)
-    total_bytes = done_bytes  # approximate
-
     fps_val = 0.0
     time_done = 0.0
 
@@ -317,17 +380,18 @@ async def encode_video(input_path: str, output_path: str,
             except: pass
 
         now = time.time()
-        if now - last_updates.get(task_id + "_enc", 0) >= 3:
+        if now - last_updates.get(task_id + "_enc", 0) >= 2:
             last_updates[task_id + "_enc"] = now
             elapsed = now - start_t
-            pct = (time_done / total_dur * 100) if total_dur > 0 else 0
+            pct = min((time_done / total_dur * 100) if total_dur > 0 else 0, 99)
             eta = ((total_dur - time_done) / fps_val * 25) if fps_val > 0 else 0
-            panel = encoding_panel(uname, pct, int(done_bytes * pct / 100),
-                                   done_bytes, fps_val, elapsed, eta, task_id)
+            panel = encoding_panel(uname, pct,
+                                   int(input_size * pct / 100), input_size,
+                                   fps_val, elapsed, eta, task_id)
             await safe_edit(msg, panel)
 
     await proc.wait()
-    return proc.returncode == 0
+    return proc.returncode == 0 and os.path.exists(output_path)
 
 # ─── CORE DOWNLOAD ───────────────────────────────────────────────────────────
 async def procesar_descarga(client: Client, message: Message,
@@ -523,22 +587,33 @@ async def procesar_descarga(client: Client, message: Message,
             raise Exception("Enlace no soportado.")
 
         # ── ENCODE (videos mp4/mkv) ────────────────────────────────────────
+        encoded_path = None
         if path and os.path.exists(path):
             lower_path = path.lower()
             if lower_path.endswith((".mp4", ".mkv", ".webm", ".avi", ".mov")):
-                encoded_path = path + "_encoded.mp4"
-                await safe_edit(msg,
-                    encoding_panel(uname, 0, 0, os.path.getsize(path),
-                                   0, 0, 0, task_id)
-                )
-                ok = await encode_video(path, encoded_path, msg, uname, task_id)
-                if ok and os.path.exists(encoded_path):
-                    os.remove(path)
-                    path = encoded_path
+                # Probe first so we can show the right status label
+                info = await asyncio.to_thread(probe_video, path)
+                is_h264 = info["codec"] == "h264"
+                is_aac  = info["audio_codec"] in ("aac", "mp3", "mp4a")
+
+                if is_h264 and is_aac and lower_path.endswith(".mp4"):
+                    # Already perfect — skip encode entirely, just get thumbnail
+                    print(f"[encode] skipped — already H.264+AAC MP4")
                 else:
-                    if encoded_path and os.path.exists(encoded_path):
-                        os.remove(encoded_path)
-                    encoded_path = None  # use original
+                    encoded_path = path + "_out.mp4"
+                    status_label = "Remuxing..." if is_h264 else "Encoding..."
+                    await safe_edit(msg,
+                        encoding_panel(uname, 0, 0, os.path.getsize(path),
+                                       0, 0, 0, task_id)
+                    )
+                    ok = await encode_video(path, encoded_path, msg, uname, task_id)
+                    if ok and os.path.exists(encoded_path):
+                        os.remove(path)
+                        path = encoded_path
+                    else:
+                        if encoded_path and os.path.exists(encoded_path):
+                            os.remove(encoded_path)
+                        encoded_path = None
 
         # ── UPLOAD ────────────────────────────────────────────────────────
         if path and os.path.exists(path):
