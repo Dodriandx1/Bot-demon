@@ -12,12 +12,17 @@ import http.server
 import socketserver
 import threading
 import re
+import json
+import struct
+import base64
 import platform
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from pyrogram import Client, filters, enums
 from pyrogram.types import Message, CallbackQuery
 from pyrogram.errors import MessageNotModified
+from Crypto.Cipher import AES
+from Crypto.Util import Counter
 
 # ─── CONFIG ─────────────────────────────────────────────────────────────────
 API_ID   = int(os.environ["API_ID"])
@@ -133,6 +138,101 @@ def get_video_meta(video_path: str) -> dict:
         return {"width": width, "height": height, "duration": duration}
     except Exception:
         return {"width": 0, "height": 0, "duration": 0}
+
+# ─── MEGA DIRECT DOWNLOADER ──────────────────────────────────────────────────
+def _mega_b64decode(s: str) -> bytes:
+    s = s.replace('-', '+').replace('_', '/')
+    s += '=' * (-len(s) % 4)
+    return base64.b64decode(s)
+
+def _mega_parse_url(url: str):
+    """Return (handle, key_b64) for file links, None on failure."""
+    m = re.search(r'mega\.nz/file/([^#\s]+)#([^\s&]+)', url)
+    if m:
+        return m.group(1), m.group(2)
+    m = re.search(r'mega\.nz/#!([^!\s]+)!([^\s&]+)', url)
+    if m:
+        return m.group(1), m.group(2)
+    return None, None
+
+async def mega_download(url: str, dest_dir: str, task_id: str, progress_cb=None):
+    """
+    Download a public MEGA file without any user session (no login → no 402).
+    Uses MEGA's /cs API to fetch the download URL, then streams + decrypts.
+    Returns (local_path, title_without_ext).
+    """
+    handle, key_b64 = _mega_parse_url(url)
+    if not handle:
+        raise ValueError("URL de MEGA no válida. Formato esperado: mega.nz/file/HANDLE#KEY")
+
+    # Decode the 256-bit MEGA key → fold to 128-bit AES key + IV
+    raw = _mega_b64decode(key_b64)
+    if len(raw) < 32:
+        raise ValueError("Clave MEGA inválida o incompleta.")
+    k = struct.unpack('>8I', raw[:32])
+    aes_key = struct.pack('>4I',
+        k[0] ^ k[4], k[1] ^ k[5], k[2] ^ k[6], k[3] ^ k[7])
+    # CTR initial counter = [k4, k5, 0, 0] as big-endian 128-bit int
+    iv_int = (k[4] << 96) | (k[5] << 64)
+
+    # Ask MEGA API for the download URL (no session required for public files)
+    async with httpx.AsyncClient(timeout=30) as hclient:
+        resp = await hclient.post(
+            f'https://g.api.mega.co.nz/cs?id=1&n={handle}',
+            json=[{"a": "g", "g": 1, "p": handle}]
+        )
+        data = resp.json()
+
+    if not isinstance(data, list) or not data:
+        raise Exception("MEGA API no respondió correctamente.")
+    item = data[0]
+    if isinstance(item, int):
+        codes = {-2: "Enlace inválido o expirado.", -9: "Objeto no encontrado.",
+                 -16: "Cuota de descarga excedida.", -18: "Recurso temporalmente no disponible."}
+        raise Exception(f"MEGA error {item}: {codes.get(item, 'desconocido')}")
+
+    dl_url = item.get('g')
+    total  = item.get('s', 0)
+    if not dl_url:
+        raise Exception("MEGA no devolvió URL de descarga.")
+
+    # Decode filename from encrypted attributes
+    filename = f"mega_{handle}"
+    try:
+        attrs_enc = item.get('at', '')
+        attrs_raw = _mega_b64decode(attrs_enc)
+        # Pad to 16-byte boundary
+        pad = 16 - len(attrs_raw) % 16
+        if pad != 16:
+            attrs_raw += b'\x00' * pad
+        aes_cbc = AES.new(aes_key, AES.MODE_CBC, iv=b'\x00' * 16)
+        attrs_plain = aes_cbc.decrypt(attrs_raw).decode('utf-8', errors='ignore')
+        # Format: "MEGA{json}"
+        if attrs_plain.startswith('MEGA'):
+            attrs_json = json.loads(attrs_plain[4:].rstrip('\x00'))
+            filename = attrs_json.get('n', filename)
+    except Exception:
+        pass  # keep default filename
+
+    dest_path = os.path.join(dest_dir, f"{task_id}_{filename}")
+
+    # Stream download + AES-128-CTR decrypt
+    ctr    = Counter.new(128, initial_value=iv_int, little_endian=False)
+    cipher = AES.new(aes_key, AES.MODE_CTR, counter=ctr)
+
+    async with httpx.AsyncClient(timeout=None) as hclient:
+        async with hclient.stream('GET', dl_url) as resp:
+            downloaded = 0
+            with open(dest_path, 'wb') as f:
+                async for chunk in resp.aiter_bytes(65536):
+                    decrypted = cipher.decrypt(chunk)
+                    f.write(decrypted)
+                    downloaded += len(chunk)
+                    if progress_cb and total > 0:
+                        await progress_cb(downloaded, total)
+
+    title = filename.rsplit('.', 1)[0] if '.' in filename else filename
+    return dest_path, title
 
 async def safe_edit(msg: Message, text: str):
     try:
@@ -514,10 +614,9 @@ async def procesar_descarga(client: Client, message: Message,
     try:
         # ── MEGA ──────────────────────────────────────────────────────────
         if is_mega:
-            engine = "yt-dlp"
+            engine = "direct"
             mode = "#MEGA"
             start_t = time.time()
-            loop = asyncio.get_running_loop()
 
             await safe_edit(msg,
                 f"╭ Task By → 「{uname}」\n"
@@ -527,45 +626,13 @@ async def procesar_descarga(client: Client, message: Message,
                 f"{BOT_SIGNATURE}"
             )
 
-            def ydl_hook_mega(d):
-                if d["status"] == "downloading":
-                    curr  = d.get("downloaded_bytes", 0)
-                    total = d.get("total_bytes") or d.get("total_bytes_estimate", 0)
-                    if total > 0:
-                        asyncio.run_coroutine_threadsafe(
-                            download_progress(curr, total, msg, start_t,
-                                              uname, task_id, engine, mode),
-                            loop
-                        )
+            async def _mega_progress(curr, total):
+                await download_progress(curr, total, msg, start_t,
+                                        uname, task_id, engine, mode)
 
-            captured_mega = {"title": ""}
-
-            def run_mega_ydl():
-                # No login — public MEGA links work without credentials.
-                # Passing username/password causes MEGA API 402 errors.
-                opts = {
-                    "outtmpl": f"{DOWNLOAD_DIR}{task_id}_%(title)s.%(ext)s",
-                    "progress_hooks": [ydl_hook_mega],
-                    "quiet": True,
-                    "no_warnings": True,
-                    # Tell yt-dlp to skip MEGA's streaming API and use direct link
-                    "extractor_args": {"mega": {"formats": ["best"]}},
-                }
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    if info:
-                        captured_mega["title"] = (
-                            info.get("title", "")
-                            or info.get("webpage_url_basename", "")
-                        )
-
-            await asyncio.to_thread(run_mega_ydl)
-
-            files = glob.glob(f"{DOWNLOAD_DIR}{task_id}_*")
-            if not files:
-                raise Exception("MEGA: no se pudo descargar el archivo. Asegúrate que el enlace sea público y no haya caducado.")
-            path = max(files, key=os.path.getctime)
-            video_title = captured_mega["title"] or os.path.splitext(os.path.basename(path))[0]
+            path, video_title = await mega_download(
+                url, DOWNLOAD_DIR, task_id, progress_cb=_mega_progress
+            )
 
         # ── MEDIAFIRE ─────────────────────────────────────────────────────
         elif is_mf:
