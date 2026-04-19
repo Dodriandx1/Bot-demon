@@ -139,14 +139,53 @@ def get_video_meta(video_path: str) -> dict:
     except Exception:
         return {"width": 0, "height": 0, "duration": 0}
 
-# ─── MEGA DIRECT DOWNLOADER ──────────────────────────────────────────────────
+# ─── MEGA DOWNLOADER (authenticated, no third-party libs) ────────────────────
+_MEGA_API = "https://g.api.mega.co.nz/cs"
+_MEGA_CHUNK = 1 * 1024 * 1024   # 1 MB chunks → fast download
+
 def _mega_b64decode(s: str) -> bytes:
     s = s.replace('-', '+').replace('_', '/')
     s += '=' * (-len(s) % 4)
     return base64.b64decode(s)
 
+def _mega_b64encode(b: bytes) -> str:
+    return base64.b64encode(b).decode().replace('+', '-').replace('/', '_').rstrip('=')
+
+def _a32(b: bytes) -> list:
+    b += b'\x00' * (-len(b) % 4)
+    return list(struct.unpack('>' + 'I' * (len(b) // 4), b))
+
+def _a32_bytes(a: list) -> bytes:
+    return struct.pack('>' + 'I' * len(a), *a)
+
+def _aes_cbc_enc_a32(data: list, key: list) -> list:
+    c = AES.new(_a32_bytes(key), AES.MODE_CBC, iv=b'\x00' * 16)
+    return _a32(c.encrypt(_a32_bytes(data)))
+
+def _aes_cbc_dec_a32(data: list, key: list) -> list:
+    c = AES.new(_a32_bytes(key), AES.MODE_CBC, iv=b'\x00' * 16)
+    return _a32(c.decrypt(_a32_bytes(data)))
+
+def _mega_prepare_key(password: str) -> list:
+    """MEGA password → AES key (65536 rounds, same as the official client)."""
+    pw = _a32(password.encode('utf-8'))
+    pkey = [0x93C467E3, 0x7DB0C7A4, 0xD1BE3F81, 0x0152CB56]
+    for _ in range(0x10000):
+        for i in range(0, len(pw), 4):
+            block = (pw[i:i+4] + [0, 0, 0, 0])[:4]
+            pkey = _aes_cbc_enc_a32(pkey, block)
+    return pkey
+
+def _mega_stringhash(s: str, aes_key: list) -> str:
+    """MEGA e-mail → user-hash string."""
+    h = [0, 0, 0, 0]
+    for i, v in enumerate(_a32(s.encode('utf-8'))):
+        h[i % 4] ^= v
+    for _ in range(0x4000):
+        h = _aes_cbc_enc_a32(h, aes_key)
+    return _mega_b64encode(_a32_bytes([h[0], h[2]]))
+
 def _mega_parse_url(url: str):
-    """Return (handle, key_b64) for file links, None on failure."""
     m = re.search(r'mega\.nz/file/([^#\s]+)#([^\s&]+)', url)
     if m:
         return m.group(1), m.group(2)
@@ -155,40 +194,129 @@ def _mega_parse_url(url: str):
         return m.group(1), m.group(2)
     return None, None
 
+def _mega_decode_attrs(at_b64: str, aes_key_bytes: bytes) -> str:
+    """Decrypt MEGA file attributes → filename."""
+    raw = _mega_b64decode(at_b64)
+    raw += b'\x00' * (-len(raw) % 16)
+    plain = AES.new(aes_key_bytes, AES.MODE_CBC, iv=b'\x00' * 16).decrypt(raw)
+    plain = plain.decode('utf-8', errors='ignore').rstrip('\x00')
+    if plain.startswith('MEGA'):
+        try:
+            return json.loads(plain[4:]).get('n', '')
+        except Exception:
+            pass
+    return ''
+
+async def _mega_api(payload: list, sid: str = '') -> list:
+    params = {'id': 1}
+    if sid:
+        params['sid'] = sid
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.post(_MEGA_API, params=params, json=payload)
+    return r.json()
+
+def _mega_mpi_read(buf: bytes, pos: int):
+    """Read a MEGA multi-precision integer. Returns (value_int, new_pos)."""
+    bits = (buf[pos] << 8) | buf[pos + 1]
+    byte_len = (bits + 7) // 8
+    val = int.from_bytes(buf[pos + 2: pos + 2 + byte_len], 'big')
+    return val, pos + 2 + byte_len
+
+async def mega_login(email: str, password: str) -> dict:
+    """
+    Authenticate with MEGA using email+password.
+    Implements MEGA's password-key derivation, user-hash, RSA session decryption.
+    Returns {'sid': session_id, 'master_key': [4 ints]}.
+    """
+    # CPU-heavy key derivation — run in thread so bot stays responsive
+    pw_key = await asyncio.to_thread(_mega_prepare_key, password)
+    uh     = _mega_stringhash(email.lower(), pw_key)
+
+    data = await _mega_api([{"a": "us", "user": email.lower(), "uh": uh}])
+    resp = data[0]
+    if isinstance(resp, int):
+        codes = {-2: "Contraseña incorrecta.", -3: "Demasiados intentos, espera.",
+                 -9: "Cuenta no encontrada."}
+        raise Exception(f"MEGA login {resp}: {codes.get(resp, 'error desconocido')}")
+
+    # Decrypt master key with password key
+    enc_mk = _a32(_mega_b64decode(resp['k']))
+    mk     = _aes_cbc_dec_a32(enc_mk, pw_key)
+
+    # --- Session ID ---
+    # Simple case: tsid (temporary session id, no RSA needed)
+    if 'tsid' in resp:
+        tsid_bytes = _mega_b64decode(resp['tsid'])
+        # Verify: encrypt first 16 bytes with master key → should match last 16 bytes
+        verify = AES.new(_a32_bytes(mk), AES.MODE_CBC, iv=b'\x00'*16).encrypt(tsid_bytes[:16])
+        if verify == tsid_bytes[16:]:
+            return {'sid': resp['tsid'], 'master_key': mk}
+
+    # Full RSA case: decrypt csid using private key stored in privk
+    if 'csid' in resp and 'privk' in resp:
+        try:
+            # Decrypt private key blob with master key (AES-128-CBC)
+            privk_enc  = _mega_b64decode(resp['privk'])
+            privk_enc += b'\x00' * (-len(privk_enc) % 16)
+            privk      = AES.new(_a32_bytes(mk), AES.MODE_CBC, iv=b'\x00'*16).decrypt(privk_enc)
+
+            # Parse RSA private key: four MPIs → p, q, d, u
+            pos  = 0
+            p, pos = _mega_mpi_read(privk, pos)
+            q, pos = _mega_mpi_read(privk, pos)
+            d, pos = _mega_mpi_read(privk, pos)
+            _u, pos = _mega_mpi_read(privk, pos)
+            n = p * q
+
+            # Decrypt csid with RSA: m = csid^d mod n
+            csid_bytes = _mega_b64decode(resp['csid'])
+            csid_int   = int.from_bytes(csid_bytes, 'big')
+            m          = pow(csid_int, d, n)
+            # Session is the first 43 bytes of the decrypted value
+            m_bytes    = m.to_bytes((m.bit_length() + 7) // 8, 'big')
+            sid        = _mega_b64encode(m_bytes[:43])
+            return {'sid': sid, 'master_key': mk}
+        except Exception as e:
+            raise Exception(f"MEGA RSA session decrypt falló: {e}")
+
+    raise Exception("MEGA login: respuesta inesperada del servidor.")
+
 async def mega_download(url: str, dest_dir: str, task_id: str, progress_cb=None):
     """
-    Download a public MEGA file without any user session (no login → no 402).
-    Uses MEGA's /cs API to fetch the download URL, then streams + decrypts.
+    Download a MEGA file with account credentials when available,
+    falling back to anonymous access for public links.
     Returns (local_path, title_without_ext).
     """
     handle, key_b64 = _mega_parse_url(url)
     if not handle:
-        raise ValueError("URL de MEGA no válida. Formato esperado: mega.nz/file/HANDLE#KEY")
+        raise ValueError("URL de MEGA no válida. Debe ser mega.nz/file/HANDLE#KEY")
 
-    # Decode the 256-bit MEGA key → fold to 128-bit AES key + IV
+    # Try authenticated session first (higher quota, up to 2 GB+)
+    sid = ''
+    if MEGA_EMAIL and MEGA_PASSWORD:
+        try:
+            session = await mega_login(MEGA_EMAIL, MEGA_PASSWORD)
+            sid = session['sid']
+            print(f"[MEGA] Sesión autenticada OK — sid={sid[:8]}...")
+        except Exception as e:
+            print(f"[MEGA] Login falló ({e}), intentando modo anónimo...")
+
+    # Fold URL key → AES-128 key + CTR IV
     raw = _mega_b64decode(key_b64)
     if len(raw) < 32:
-        raise ValueError("Clave MEGA inválida o incompleta.")
-    k = struct.unpack('>8I', raw[:32])
-    aes_key = struct.pack('>4I',
-        k[0] ^ k[4], k[1] ^ k[5], k[2] ^ k[6], k[3] ^ k[7])
-    # CTR initial counter = [k4, k5, 0, 0] as big-endian 128-bit int
+        raise ValueError("Clave MEGA inválida en el URL.")
+    k   = struct.unpack('>8I', raw[:32])
+    aes_key_bytes = struct.pack('>4I',
+        k[0]^k[4], k[1]^k[5], k[2]^k[6], k[3]^k[7])
     iv_int = (k[4] << 96) | (k[5] << 64)
 
-    # Ask MEGA API for the download URL (no session required for public files)
-    async with httpx.AsyncClient(timeout=30) as hclient:
-        resp = await hclient.post(
-            f'https://g.api.mega.co.nz/cs?id=1&n={handle}',
-            json=[{"a": "g", "g": 1, "p": handle}]
-        )
-        data = resp.json()
-
-    if not isinstance(data, list) or not data:
-        raise Exception("MEGA API no respondió correctamente.")
-    item = data[0]
+    # Get download URL from MEGA API
+    payload = [{"a": "g", "g": 1, "p": handle}]
+    data    = await _mega_api(payload, sid=sid)
+    item    = data[0]
     if isinstance(item, int):
         codes = {-2: "Enlace inválido o expirado.", -9: "Objeto no encontrado.",
-                 -16: "Cuota de descarga excedida.", -18: "Recurso temporalmente no disponible."}
+                 -16: "Cuota de descarga excedida.", -18: "Recurso no disponible."}
         raise Exception(f"MEGA error {item}: {codes.get(item, 'desconocido')}")
 
     dl_url = item.get('g')
@@ -196,38 +324,25 @@ async def mega_download(url: str, dest_dir: str, task_id: str, progress_cb=None)
     if not dl_url:
         raise Exception("MEGA no devolvió URL de descarga.")
 
-    # Decode filename from encrypted attributes
-    filename = f"mega_{handle}"
-    try:
-        attrs_enc = item.get('at', '')
-        attrs_raw = _mega_b64decode(attrs_enc)
-        # Pad to 16-byte boundary
-        pad = 16 - len(attrs_raw) % 16
-        if pad != 16:
-            attrs_raw += b'\x00' * pad
-        aes_cbc = AES.new(aes_key, AES.MODE_CBC, iv=b'\x00' * 16)
-        attrs_plain = aes_cbc.decrypt(attrs_raw).decode('utf-8', errors='ignore')
-        # Format: "MEGA{json}"
-        if attrs_plain.startswith('MEGA'):
-            attrs_json = json.loads(attrs_plain[4:].rstrip('\x00'))
-            filename = attrs_json.get('n', filename)
-    except Exception:
-        pass  # keep default filename
-
+    filename = _mega_decode_attrs(item.get('at', ''), aes_key_bytes) or f"mega_{handle}"
     dest_path = os.path.join(dest_dir, f"{task_id}_{filename}")
 
-    # Stream download + AES-128-CTR decrypt
+    # Stream + decrypt AES-128-CTR
     ctr    = Counter.new(128, initial_value=iv_int, little_endian=False)
-    cipher = AES.new(aes_key, AES.MODE_CTR, counter=ctr)
+    cipher = AES.new(aes_key_bytes, AES.MODE_CTR, counter=ctr)
 
-    async with httpx.AsyncClient(timeout=None) as hclient:
+    async with httpx.AsyncClient(timeout=None, follow_redirects=True) as hclient:
         async with hclient.stream('GET', dl_url) as resp:
             downloaded = 0
             with open(dest_path, 'wb') as f:
-                async for chunk in resp.aiter_bytes(65536):
-                    decrypted = cipher.decrypt(chunk)
+                async for chunk in resp.aiter_bytes(_MEGA_CHUNK):
+                    orig_len = len(chunk)
+                    # AES block must be multiple of 16; pad last chunk if needed
+                    if orig_len % 16:
+                        chunk += b'\x00' * (16 - orig_len % 16)
+                    decrypted = cipher.decrypt(chunk)[:orig_len]
                     f.write(decrypted)
-                    downloaded += len(chunk)
+                    downloaded += orig_len
                     if progress_cb and total > 0:
                         await progress_cb(downloaded, total)
 
