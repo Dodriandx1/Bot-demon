@@ -252,8 +252,15 @@ async def upload_smart_file(client: Client, message: Message, path: str,
                              title: str = ""):
     fname = os.path.basename(path)
     display = title.strip() if title.strip() else fname
-    caption = f"🎬 <b>{display}</b>\n\n{BOT_SIGNATURE}"
     lower = fname.lower()
+    # Choose emoji based on file type
+    if lower.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif")):
+        icon = "🖼️"
+    elif lower.endswith((".mp3", ".m4a", ".wav", ".flac", ".ogg")):
+        icon = "🎵"
+    else:
+        icon = "🎬"
+    caption = f"{icon} <b>{display}</b>\n\n{BOT_SIGNATURE}"
     start_t = time.time()
 
     if lower.endswith((".mp4", ".mkv", ".webm", ".avi", ".mov")):
@@ -306,6 +313,16 @@ async def upload_smart_file(client: Client, message: Message, path: str,
         await client.send_photo(
             chat_id=message.chat.id,
             photo=path,
+            caption=caption,
+            parse_mode=enums.ParseMode.HTML,
+            progress=upload_progress,
+            progress_args=(msg, start_t, uname, task_id)
+        )
+
+    elif lower.endswith(".gif"):
+        await client.send_animation(
+            chat_id=message.chat.id,
+            animation=path,
             caption=caption,
             parse_mode=enums.ParseMode.HTML,
             progress=upload_progress,
@@ -599,7 +616,7 @@ async def procesar_descarga(client: Client, message: Message,
             captured = {"title": ""}
 
             def run_ydl():
-                opts = {
+                base_opts = {
                     "outtmpl": f"{DOWNLOAD_DIR}{task_id}_%(playlist_index)s%(title)s.%(ext)s",
                     "noplaylist": False,
                     "progress_hooks": [ydl_hook],
@@ -607,8 +624,8 @@ async def procesar_descarga(client: Client, message: Message,
                     "no_warnings": True,
                 }
                 if is_video_host:
-                    opts["format"] = "best"
-                    opts["http_headers"] = {
+                    base_opts["format"] = "best"
+                    base_opts["http_headers"] = {
                         "User-Agent": (
                             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                             "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -617,15 +634,29 @@ async def procesar_descarga(client: Client, message: Message,
                         "Referer": url,
                     }
                 else:
-                    opts["format"] = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+                    # Prefer mp4 video, but fall back to any format
+                    # (handles image-only posts on Instagram, Twitter, etc.)
+                    base_opts["format"] = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
 
                 if os.path.exists("cookies.txt"):
-                    opts["cookiefile"] = "cookies.txt"
+                    base_opts["cookiefile"] = "cookies.txt"
 
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    if info:
-                        captured["title"] = info.get("title", "") or info.get("webpage_url_basename", "")
+                def _extract(opts):
+                    with yt_dlp.YoutubeDL(opts) as ydl:
+                        info = ydl.extract_info(url, download=True)
+                        if info:
+                            captured["title"] = (
+                                info.get("title", "")
+                                or info.get("webpage_url_basename", "")
+                            )
+
+                try:
+                    _extract(base_opts)
+                except Exception:
+                    # Retry without format restriction — handles photo-only posts
+                    fallback = dict(base_opts)
+                    fallback.pop("format", None)
+                    _extract(fallback)
 
             await safe_edit(msg,
                 f"╭ Task By → 「{uname}」\n"
@@ -650,16 +681,22 @@ async def procesar_descarga(client: Client, message: Message,
                     f"╰ Files    : {len(files)}\n\n"
                     f"{BOT_SIGNATURE}"
                 )
-                from pyrogram.types import InputMediaPhoto, InputMediaVideo
+                from pyrogram.types import InputMediaPhoto, InputMediaVideo, InputMediaDocument
+                album_caption = f"🖼️ <b>{video_title}</b>\n\n{BOT_SIGNATURE}" if video_title else BOT_SIGNATURE
                 group = []
-                for f in files:
+                for idx, f in enumerate(files):
                     fl = f.lower()
+                    cap = album_caption if idx == 0 else None
+                    parse = enums.ParseMode.HTML if cap else None
                     if fl.endswith((".jpg", ".jpeg", ".png", ".webp")):
-                        group.append(InputMediaPhoto(f))
-                    elif fl.endswith((".mp4", ".mkv", ".webm")):
-                        group.append(InputMediaVideo(f))
-                for i in range(0, len(group), 10):
-                    await client.send_media_group(message.chat.id, group[i:i+10])
+                        group.append(InputMediaPhoto(f, caption=cap, parse_mode=parse))
+                    elif fl.endswith((".mp4", ".mkv", ".webm", ".avi", ".mov")):
+                        group.append(InputMediaVideo(f, caption=cap, parse_mode=parse, supports_streaming=True))
+                    elif fl.endswith(".gif"):
+                        group.append(InputMediaDocument(f, caption=cap, parse_mode=parse))
+                if group:
+                    for i in range(0, len(group), 10):
+                        await client.send_media_group(message.chat.id, group[i:i+10])
                 await msg.delete()
                 return
             else:
