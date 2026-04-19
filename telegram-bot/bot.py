@@ -658,31 +658,41 @@ async def encode_video(input_path: str, output_path: str,
     fps_val = 0.0
     time_done = 0.0
 
-    while True:
-        if active_tasks.get(task_id) == "CANCELLED":
-            proc.kill()
-            return False
-        line_bytes = await proc.stdout.readline()
-        if not line_bytes:
-            break
-        line = line_bytes.decode().strip()
-        if line.startswith("fps="):
-            try: fps_val = float(line.split("=")[1])
-            except: pass
-        if line.startswith("out_time_ms="):
-            try: time_done = int(line.split("=")[1]) / 1_000_000
-            except: pass
+    try:
+        while True:
+            if active_tasks.get(task_id) == "CANCELLED":
+                proc.kill()
+                await proc.wait()
+                return False
+            line_bytes = await proc.stdout.readline()  # CancelledError arrives here
+            if not line_bytes:
+                break
+            line = line_bytes.decode().strip()
+            if line.startswith("fps="):
+                try: fps_val = float(line.split("=")[1])
+                except: pass
+            if line.startswith("out_time_ms="):
+                try: time_done = int(line.split("=")[1]) / 1_000_000
+                except: pass
 
-        now = time.time()
-        if now - last_updates.get(task_id + "_enc", 0) >= 2:
-            last_updates[task_id + "_enc"] = now
-            elapsed = now - start_t
-            pct = min((time_done / total_dur * 100) if total_dur > 0 else 0, 99)
-            eta = ((total_dur - time_done) / fps_val * 25) if fps_val > 0 else 0
-            panel = encoding_panel(uname, pct,
-                                   int(input_size * pct / 100), input_size,
-                                   fps_val, elapsed, eta, task_id)
-            await safe_edit(msg, panel)
+            now = time.time()
+            if now - last_updates.get(task_id + "_enc", 0) >= 2:
+                last_updates[task_id + "_enc"] = now
+                elapsed = now - start_t
+                pct = min((time_done / total_dur * 100) if total_dur > 0 else 0, 99)
+                eta = ((total_dur - time_done) / fps_val * 25) if fps_val > 0 else 0
+                panel = encoding_panel(uname, pct,
+                                       int(input_size * pct / 100), input_size,
+                                       fps_val, elapsed, eta, task_id)
+                await safe_edit(msg, panel)
+    except (asyncio.CancelledError, Exception):
+        # Kill ffmpeg immediately on any cancellation or error
+        try:
+            proc.kill()
+            await proc.wait()
+        except Exception:
+            pass
+        raise   # re-raise so the outer handler knows
 
     await proc.wait()
     return proc.returncode == 0 and os.path.exists(output_path)
@@ -782,7 +792,8 @@ async def procesar_descarga(client: Client, message: Message,
                     total = int(resp.headers.get("content-length", 0))
                     with open(path, "wb") as f:
                         curr = 0
-                        async for chunk in resp.aiter_bytes(chunk_size=65536):
+                        async for chunk in resp.aiter_bytes(chunk_size=1024*1024):
+                            await asyncio.sleep(0)   # let CancelledError in immediately
                             if active_tasks.get(task_id) == "CANCELLED":
                                 raise Exception("USER_CANCELLED")
                             f.write(chunk)
