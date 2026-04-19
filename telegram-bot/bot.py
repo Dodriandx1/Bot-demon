@@ -36,7 +36,9 @@ os.makedirs(DOWNLOAD_DIR, mode=0o777, exist_ok=True)
 
 start_time = time.time()
 
-active_tasks: dict = {}
+active_tasks: dict = {}       # task_id → "RUNNING" | "CANCELLED"
+_task_handles: dict = {}      # task_id → asyncio.Task  (for hard cancel)
+_ydl_stop: dict = {}          # task_id → threading.Event (for yt-dlp thread)
 last_updates: dict = {}
 download_queue: asyncio.Queue = asyncio.Queue()
 
@@ -336,6 +338,8 @@ async def mega_download(url: str, dest_dir: str, task_id: str, progress_cb=None)
             downloaded = 0
             with open(dest_path, 'wb') as f:
                 async for chunk in resp.aiter_bytes(_MEGA_CHUNK):
+                    # This await point lets CancelledError propagate immediately
+                    await asyncio.sleep(0)
                     orig_len = len(chunk)
                     # AES block must be multiple of 16; pad last chunk if needed
                     if orig_len % 16:
@@ -714,6 +718,15 @@ async def procesar_descarga(client: Client, message: Message,
     task_id = f"{uid}_{int(time.time())}"
     active_tasks[task_id] = "RUNNING"
 
+    # Register current asyncio Task so /cancel can forcefully cancel it
+    _current = asyncio.current_task()
+    if _current:
+        _task_handles[task_id] = _current
+
+    # threading.Event for yt-dlp (runs in a thread, can't use CancelledError)
+    _stop_evt = threading.Event()
+    _ydl_stop[task_id] = _stop_evt
+
     msg = await message.reply_text(
         f"╭ Task By → 「{uname}」\n"
         f"┊ [{make_bar(0)}] 0.00%\n"
@@ -785,6 +798,9 @@ async def procesar_descarga(client: Client, message: Message,
             loop = asyncio.get_running_loop()
 
             def ydl_hook(d):
+                # Hard stop: raise inside the yt-dlp thread when cancelled
+                if _stop_evt.is_set() or active_tasks.get(task_id) == "CANCELLED":
+                    raise Exception("USER_CANCELLED")
                 if d["status"] == "downloading":
                     curr  = d.get("downloaded_bytes", 0)
                     total = d.get("total_bytes") or d.get("total_bytes_estimate", 0)
@@ -834,7 +850,9 @@ async def procesar_descarga(client: Client, message: Message,
 
                 try:
                     _extract(base_opts)
-                except Exception:
+                except Exception as _e:
+                    if "USER_CANCELLED" in str(_e):
+                        raise  # propagate cancel immediately, no retry
                     # Retry without format restriction — handles photo-only posts
                     fallback = dict(base_opts)
                     fallback.pop("format", None)
@@ -927,16 +945,22 @@ async def procesar_descarga(client: Client, message: Message,
             except Exception:
                 pass
 
-    except Exception as e:
-        err = "🛑 Tarea cancelada." if "USER_CANCELLED" in str(e) else f"❌ Error: {str(e)[:200]}"
-        await safe_edit(msg,
-            f"╭ Task By → 「{uname}」\n"
-            f"┊ {err}\n"
-            f"╰──────────────\n\n"
-            f"{BOT_SIGNATURE}"
-        )
+    except (Exception, asyncio.CancelledError) as e:
+        is_cancel = isinstance(e, asyncio.CancelledError) or "USER_CANCELLED" in str(e)
+        err = "🛑 Tarea cancelada." if is_cancel else f"❌ Error: {str(e)[:200]}"
+        try:
+            await safe_edit(msg,
+                f"╭ Task By → 「{uname}」\n"
+                f"┊ {err}\n"
+                f"╰──────────────\n\n"
+                f"{BOT_SIGNATURE}"
+            )
+        except Exception:
+            pass
     finally:
         active_tasks.pop(task_id, None)
+        _task_handles.pop(task_id, None)
+        _ydl_stop.pop(task_id, None)
         last_updates.pop(task_id + "_dl", None)
         last_updates.pop(task_id + "_up", None)
         last_updates.pop(task_id + "_enc", None)
@@ -955,8 +979,14 @@ async def queue_worker():
     while True:
         client, message, url, uname, uid, label = await download_queue.get()
         try:
-            await procesar_descarga(client, message, url, uname, uid, label)
-        except Exception as e:
+            # Run each download in its OWN asyncio Task so that
+            # asyncio.current_task() inside procesar_descarga is per-download,
+            # and task.cancel() only kills that one download.
+            dl_task = asyncio.create_task(
+                procesar_descarga(client, message, url, uname, uid, label)
+            )
+            await dl_task
+        except (Exception, asyncio.CancelledError) as e:
             print(f"[worker] error: {e}")
         finally:
             download_queue.task_done()
@@ -988,8 +1018,16 @@ async def cmd_start(client: Client, message: Message):
 async def cmd_cancel(client: Client, message: Message):
     task_id = message.matches[0].group(1)
     if task_id in active_tasks:
+        # 1. Set the flag (checked by all progress callbacks and MEGA loop)
         active_tasks[task_id] = "CANCELLED"
-        await message.reply_text("🛑 Cancelando descarga...")
+        # 2. Signal yt-dlp thread to stop immediately
+        if task_id in _ydl_stop:
+            _ydl_stop[task_id].set()
+        # 3. Cancel the asyncio Task (stops httpx streams and Pyrogram uploads)
+        task_handle = _task_handles.get(task_id)
+        if task_handle and not task_handle.done():
+            task_handle.cancel()
+        await message.reply_text("🛑 Tarea cancelada.")
     else:
         await message.reply_text("⚠️ No hay ninguna tarea activa con ese ID.")
 
