@@ -25,8 +25,8 @@ from Crypto.Cipher import AES
 from Crypto.Util import Counter
 
 # ─── CONFIG ─────────────────────────────────────────────────────────────────
-API_ID   = int(os.environ["API_ID"])
-API_HASH = os.environ["API_HASH"]
+API_ID    = int(os.environ["API_ID"])
+API_HASH  = os.environ["API_HASH"]
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 MEGA_EMAIL    = os.environ.get("MEGA_EMAIL", "")
 MEGA_PASSWORD = os.environ.get("MEGA_PASSWORD", "")
@@ -230,7 +230,6 @@ async def mega_login(email: str, password: str) -> dict:
     Implements MEGA's password-key derivation, user-hash, RSA session decryption.
     Returns {'sid': session_id, 'master_key': [4 ints]}.
     """
-    # CPU-heavy key derivation — run in thread so bot stays responsive
     pw_key = await asyncio.to_thread(_mega_prepare_key, password)
     uh     = _mega_stringhash(email.lower(), pw_key)
 
@@ -241,28 +240,21 @@ async def mega_login(email: str, password: str) -> dict:
                  -9: "Cuenta no encontrada."}
         raise Exception(f"MEGA login {resp}: {codes.get(resp, 'error desconocido')}")
 
-    # Decrypt master key with password key
     enc_mk = _a32(_mega_b64decode(resp['k']))
     mk     = _aes_cbc_dec_a32(enc_mk, pw_key)
 
-    # --- Session ID ---
-    # Simple case: tsid (temporary session id, no RSA needed)
     if 'tsid' in resp:
         tsid_bytes = _mega_b64decode(resp['tsid'])
-        # Verify: encrypt first 16 bytes with master key → should match last 16 bytes
         verify = AES.new(_a32_bytes(mk), AES.MODE_CBC, iv=b'\x00'*16).encrypt(tsid_bytes[:16])
         if verify == tsid_bytes[16:]:
             return {'sid': resp['tsid'], 'master_key': mk}
 
-    # Full RSA case: decrypt csid using private key stored in privk
     if 'csid' in resp and 'privk' in resp:
         try:
-            # Decrypt private key blob with master key (AES-128-CBC)
             privk_enc  = _mega_b64decode(resp['privk'])
             privk_enc += b'\x00' * (-len(privk_enc) % 16)
             privk      = AES.new(_a32_bytes(mk), AES.MODE_CBC, iv=b'\x00'*16).decrypt(privk_enc)
 
-            # Parse RSA private key: four MPIs → p, q, d, u
             pos  = 0
             p, pos = _mega_mpi_read(privk, pos)
             q, pos = _mega_mpi_read(privk, pos)
@@ -270,11 +262,9 @@ async def mega_login(email: str, password: str) -> dict:
             _u, pos = _mega_mpi_read(privk, pos)
             n = p * q
 
-            # Decrypt csid with RSA: m = csid^d mod n
             csid_bytes = _mega_b64decode(resp['csid'])
             csid_int   = int.from_bytes(csid_bytes, 'big')
             m          = pow(csid_int, d, n)
-            # Session is the first 43 bytes of the decrypted value
             m_bytes    = m.to_bytes((m.bit_length() + 7) // 8, 'big')
             sid        = _mega_b64encode(m_bytes[:43])
             return {'sid': sid, 'master_key': mk}
@@ -293,7 +283,6 @@ async def mega_download(url: str, dest_dir: str, task_id: str, progress_cb=None)
     if not handle:
         raise ValueError("URL de MEGA no válida. Debe ser mega.nz/file/HANDLE#KEY")
 
-    # Try authenticated session first (higher quota, up to 2 GB+)
     sid = ''
     if MEGA_EMAIL and MEGA_PASSWORD:
         try:
@@ -303,7 +292,6 @@ async def mega_download(url: str, dest_dir: str, task_id: str, progress_cb=None)
         except Exception as e:
             print(f"[MEGA] Login falló ({e}), intentando modo anónimo...")
 
-    # Fold URL key → AES-128 key + CTR IV
     raw = _mega_b64decode(key_b64)
     if len(raw) < 32:
         raise ValueError("Clave MEGA inválida en el URL.")
@@ -312,7 +300,6 @@ async def mega_download(url: str, dest_dir: str, task_id: str, progress_cb=None)
         k[0]^k[4], k[1]^k[5], k[2]^k[6], k[3]^k[7])
     iv_int = (k[4] << 96) | (k[5] << 64)
 
-    # Get download URL from MEGA API
     payload = [{"a": "g", "g": 1, "p": handle}]
     data    = await _mega_api(payload, sid=sid)
     item    = data[0]
@@ -329,7 +316,6 @@ async def mega_download(url: str, dest_dir: str, task_id: str, progress_cb=None)
     filename = _mega_decode_attrs(item.get('at', ''), aes_key_bytes) or f"mega_{handle}"
     dest_path = os.path.join(dest_dir, f"{task_id}_{filename}")
 
-    # Stream + decrypt AES-128-CTR
     ctr    = Counter.new(128, initial_value=iv_int, little_endian=False)
     cipher = AES.new(aes_key_bytes, AES.MODE_CTR, counter=ctr)
 
@@ -338,10 +324,8 @@ async def mega_download(url: str, dest_dir: str, task_id: str, progress_cb=None)
             downloaded = 0
             with open(dest_path, 'wb') as f:
                 async for chunk in resp.aiter_bytes(_MEGA_CHUNK):
-                    # This await point lets CancelledError propagate immediately
                     await asyncio.sleep(0)
                     orig_len = len(chunk)
-                    # AES block must be multiple of 16; pad last chunk if needed
                     if orig_len % 16:
                         chunk += b'\x00' * (16 - orig_len % 16)
                     decrypted = cipher.decrypt(chunk)[:orig_len]
@@ -472,8 +456,8 @@ async def upload_smart_file(client: Client, message: Message, path: str,
     fname = os.path.basename(path)
     display = title.strip() if title.strip() else fname
     lower = fname.lower()
-    # Choose emoji based on file type
-    if lower.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif")):
+    
+    if lower.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp")):
         icon = "🖼️"
     elif lower.endswith((".mp3", ".m4a", ".wav", ".flac", ".ogg")):
         icon = "🎵"
@@ -528,7 +512,7 @@ async def upload_smart_file(client: Client, message: Message, path: str,
                 try: os.remove(thumb)
                 except: pass
 
-    elif lower.endswith((".jpg", ".jpeg", ".png", ".webp")):
+    elif lower.endswith((".jpg", ".jpeg", ".png", ".webp", ".bmp")):
         await client.send_photo(
             chat_id=message.chat.id,
             photo=path,
@@ -570,7 +554,6 @@ async def upload_smart_file(client: Client, message: Message, path: str,
 
 # ─── PROBE VIDEO INFO ────────────────────────────────────────────────────────
 def probe_video(input_path: str) -> dict:
-    """Returns dict with 'codec', 'duration', 'audio_codec'."""
     try:
         result = subprocess.run(
             [
@@ -605,31 +588,22 @@ def probe_video(input_path: str) -> dict:
 # ─── ENCODE HELPER ───────────────────────────────────────────────────────────
 async def encode_video(input_path: str, output_path: str,
                         msg: Message, uname: str, task_id: str) -> bool:
-    """
-    Smart encode:
-      • H.264 + AAC/MP3  → remux only (stream copy, near-instant)
-      • H.264 + other audio → copy video, re-encode audio only (fast)
-      • Other codec      → full re-encode with ultrafast preset (fastest possible)
-    """
     info = await asyncio.to_thread(probe_video, input_path)
     codec       = info["codec"]
     total_dur   = info["duration"]
     audio_codec = info["audio_codec"]
     input_size  = os.path.getsize(input_path)
 
-    # Decide strategy
     is_h264 = codec == "h264"
     is_aac_compat = audio_codec in ("aac", "mp3", "mp4a")
 
     if is_h264 and is_aac_compat:
-        # ── Remux only: copy everything, no re-encode ──────────────────────
         cmd = ["ffmpeg", "-i", input_path,
                "-c:v", "copy", "-c:a", "copy",
                "-movflags", "+faststart",
                "-y", output_path]
         engine_label = "Remux (stream copy)"
     elif is_h264:
-        # ── Copy video, re-encode audio only ──────────────────────────────
         cmd = ["ffmpeg", "-i", input_path,
                "-c:v", "copy",
                "-c:a", "aac", "-b:a", "128k",
@@ -637,7 +611,6 @@ async def encode_video(input_path: str, output_path: str,
                "-y", output_path]
         engine_label = "Copy+AAC"
     else:
-        # ── Full re-encode with ultrafast preset ──────────────────────────
         cmd = ["ffmpeg", "-i", input_path,
                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
                "-c:a", "aac", "-b:a", "128k",
@@ -664,7 +637,7 @@ async def encode_video(input_path: str, output_path: str,
                 proc.kill()
                 await proc.wait()
                 return False
-            line_bytes = await proc.stdout.readline()  # CancelledError arrives here
+            line_bytes = await proc.stdout.readline() 
             if not line_bytes:
                 break
             line = line_bytes.decode().strip()
@@ -686,13 +659,12 @@ async def encode_video(input_path: str, output_path: str,
                                        fps_val, elapsed, eta, task_id)
                 await safe_edit(msg, panel)
     except (asyncio.CancelledError, Exception):
-        # Kill ffmpeg immediately on any cancellation or error
         try:
             proc.kill()
             await proc.wait()
         except Exception:
             pass
-        raise   # re-raise so the outer handler knows
+        raise   
 
     await proc.wait()
     return proc.returncode == 0 and os.path.exists(output_path)
@@ -719,21 +691,24 @@ async def procesar_descarga(client: Client, message: Message,
         "mp4upload", "streamtape", "flashwish", "callistanise",
         "filelions", "swishdesu",
     ]
+    IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif")
 
-    is_mega      = "mega.nz" in url
-    is_mf        = "mediafire.com" in url
+    is_mega       = "mega.nz" in url
+    is_mf         = "mediafire.com" in url
     is_video_host = any(h in url.lower() for h in VIDEO_HOSTS)
-    is_social    = url.startswith("http") and not is_mega and not is_mf and not is_video_host
+    
+    # ── NUEVO: Detección de imágenes directas ──
+    is_direct_img = any(url.lower().split("?")[0].endswith(ext) for ext in IMAGE_EXTS)
+    
+    is_social     = url.startswith("http") and not is_mega and not is_mf and not is_video_host and not is_direct_img
 
     task_id = f"{uid}_{int(time.time())}"
     active_tasks[task_id] = "RUNNING"
 
-    # Register current asyncio Task so /cancel can forcefully cancel it
     _current = asyncio.current_task()
     if _current:
         _task_handles[task_id] = _current
 
-    # threading.Event for yt-dlp (runs in a thread, can't use CancelledError)
     _stop_evt = threading.Event()
     _ydl_stop[task_id] = _stop_evt
 
@@ -793,7 +768,32 @@ async def procesar_descarga(client: Client, message: Message,
                     with open(path, "wb") as f:
                         curr = 0
                         async for chunk in resp.aiter_bytes(chunk_size=1024*1024):
-                            await asyncio.sleep(0)   # let CancelledError in immediately
+                            await asyncio.sleep(0)   
+                            if active_tasks.get(task_id) == "CANCELLED":
+                                raise Exception("USER_CANCELLED")
+                            f.write(chunk)
+                            curr += len(chunk)
+                            await download_progress(curr, total, msg, start_t,
+                                                    uname, task_id, engine, mode)
+
+        # ── IMÁGENES DIRECTAS ─────────────────────────────────────────────
+        elif is_direct_img:
+            engine = "httpx"
+            mode = "#Image"
+            filename = url.split("/")[-1].split("?")[0]
+            if not filename or "." not in filename:
+                filename = "image.jpg"
+            path = os.path.join(DOWNLOAD_DIR, f"{task_id}_{filename}")
+            video_title = filename
+
+            start_t = time.time()
+            async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as h:
+                async with h.stream("GET", url) as resp:
+                    total = int(resp.headers.get("content-length", 0))
+                    with open(path, "wb") as f:
+                        curr = 0
+                        async for chunk in resp.aiter_bytes(chunk_size=1024*1024):
+                            await asyncio.sleep(0)
                             if active_tasks.get(task_id) == "CANCELLED":
                                 raise Exception("USER_CANCELLED")
                             f.write(chunk)
@@ -809,7 +809,6 @@ async def procesar_descarga(client: Client, message: Message,
             loop = asyncio.get_running_loop()
 
             def ydl_hook(d):
-                # Hard stop: raise inside the yt-dlp thread when cancelled
                 if _stop_evt.is_set() or active_tasks.get(task_id) == "CANCELLED":
                     raise Exception("USER_CANCELLED")
                 if d["status"] == "downloading":
@@ -843,8 +842,6 @@ async def procesar_descarga(client: Client, message: Message,
                         "Referer": url,
                     }
                 else:
-                    # Prefer mp4 video, but fall back to any format
-                    # (handles image-only posts on Instagram, Twitter, etc.)
                     base_opts["format"] = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
 
                 if os.path.exists("cookies.txt"):
@@ -863,8 +860,7 @@ async def procesar_descarga(client: Client, message: Message,
                     _extract(base_opts)
                 except Exception as _e:
                     if "USER_CANCELLED" in str(_e):
-                        raise  # propagate cancel immediately, no retry
-                    # Retry without format restriction — handles photo-only posts
+                        raise 
                     fallback = dict(base_opts)
                     fallback.pop("format", None)
                     _extract(fallback)
@@ -899,7 +895,7 @@ async def procesar_descarga(client: Client, message: Message,
                     fl = f.lower()
                     cap = album_caption if idx == 0 else None
                     parse = enums.ParseMode.HTML if cap else None
-                    if fl.endswith((".jpg", ".jpeg", ".png", ".webp")):
+                    if fl.endswith((".jpg", ".jpeg", ".png", ".webp", ".bmp")):
                         group.append(InputMediaPhoto(f, caption=cap, parse_mode=parse))
                     elif fl.endswith((".mp4", ".mkv", ".webm", ".avi", ".mov")):
                         group.append(InputMediaVideo(f, caption=cap, parse_mode=parse, supports_streaming=True))
@@ -921,13 +917,11 @@ async def procesar_descarga(client: Client, message: Message,
         if path and os.path.exists(path):
             lower_path = path.lower()
             if lower_path.endswith((".mp4", ".mkv", ".webm", ".avi", ".mov")):
-                # Probe first so we can show the right status label
                 info = await asyncio.to_thread(probe_video, path)
                 is_h264 = info["codec"] == "h264"
                 is_aac  = info["audio_codec"] in ("aac", "mp3", "mp4a")
 
                 if is_h264 and is_aac and lower_path.endswith(".mp4"):
-                    # Already perfect — skip encode entirely, just get thumbnail
                     print(f"[encode] skipped — already H.264+AAC MP4")
                 else:
                     encoded_path = path + "_out.mp4"
@@ -990,9 +984,6 @@ async def queue_worker():
     while True:
         client, message, url, uname, uid, label = await download_queue.get()
         try:
-            # Run each download in its OWN asyncio Task so that
-            # asyncio.current_task() inside procesar_descarga is per-download,
-            # and task.cancel() only kills that one download.
             dl_task = asyncio.create_task(
                 procesar_descarga(client, message, url, uname, uid, label)
             )
@@ -1029,12 +1020,9 @@ async def cmd_start(client: Client, message: Message):
 async def cmd_cancel(client: Client, message: Message):
     task_id = message.matches[0].group(1)
     if task_id in active_tasks:
-        # 1. Set the flag (checked by all progress callbacks and MEGA loop)
         active_tasks[task_id] = "CANCELLED"
-        # 2. Signal yt-dlp thread to stop immediately
         if task_id in _ydl_stop:
             _ydl_stop[task_id].set()
-        # 3. Cancel the asyncio Task (stops httpx streams and Pyrogram uploads)
         task_handle = _task_handles.get(task_id)
         if task_handle and not task_handle.done():
             task_handle.cancel()
@@ -1070,7 +1058,6 @@ async def cmd_stat(client: Client, message: Message):
 async def cmd_reset(client: Client, message: Message):
     msg = await message.reply_text("♻️ Reiniciando...")
 
-    # Cancel all active tasks
     cancelled = len(active_tasks)
     for tid in list(active_tasks.keys()):
         active_tasks[tid] = "CANCELLED"
@@ -1097,7 +1084,7 @@ async def cmd_reset(client: Client, message: Message):
         f"┊ 🕐 Uptime    : {new_uptime}\n"
         f"┊ 🧹 Liberado  : {freed}\n"
         f"┊ ⛔ Descargas : {'Canceladas' if cancelled > 0 else 'Ninguna activa'}\n"
-        f"╰─ Engine     : CRDWV2\n\n"
+        f"╰─ Engine      : CRDWV2\n\n"
         f"{BOT_SIGNATURE}"
     )
 
