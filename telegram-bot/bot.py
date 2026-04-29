@@ -48,7 +48,6 @@ download_queue: asyncio.Queue = asyncio.Queue()
 BOT_SIGNATURE = "✪ Bot By → @The_canst & @Ryota_YT"
 
 # ─── SISTEMA DE AUTORIZACIÓN ─────────────────────────────────────────────────
-# Cargar usuarios autorizados desde el archivo al iniciar
 if os.path.exists(AUTH_FILE):
     with open(AUTH_FILE, "r") as f:
         try:
@@ -347,7 +346,7 @@ def encoding_panel(uname: str, percentage: float, done_bytes: int, total_bytes: 
         f"┊ Status   : Encoding\n"
         f"┊ Done     : {get_readable_size(done_bytes)}\n"
         f"┊ Total    : {get_readable_size(total_bytes)}\n"
-        f"┊ Speed    : {fps:.2f} fps\n"
+        f"┊ Speed    : {get_readable_size(speed_bps)}/s\n"
         f"┊ ETA      : {get_readable_time(eta)}\n"
         f"┊ Past     : {get_readable_time(elapsed)}\n"
         f"┊ Engine   : HandBrake\n"
@@ -665,7 +664,6 @@ async def procesar_descarga(client: Client, message: Message, url: str, uname: s
                 images = data_obj.get("images")
                 video_url = data_obj.get("hdplay") or data_obj.get("play")
                 
-                # Si es un carrusel de fotos
                 if images and isinstance(images, list):
                     await safe_edit(msg,
                         f"╭ Task By → 「{uname}」\n"
@@ -700,7 +698,6 @@ async def procesar_descarga(client: Client, message: Message, url: str, uname: s
                         except: pass
                     return  
                     
-                # Si es un video estándar
                 elif video_url:
                     path = os.path.join(DOWNLOAD_DIR, f"{task_id}.mp4")
                     async with httpx.AsyncClient(timeout=120.0) as h:
@@ -772,7 +769,32 @@ async def procesar_descarga(client: Client, message: Message, url: str, uname: s
             video_title = captured["title"]
 
             files = sorted(glob.glob(f"{DOWNLOAD_DIR}{task_id}_*"), key=os.path.getsize)
-            if not files: raise Exception("No se pudo descargar. Posible bloqueo de IP o enlace inválido.")
+            
+            # ─── NUEVO: FALLBACK UNIVERSAL DE IMÁGENES (PINTEREST, ETC) ───
+            if not files:
+                await safe_edit(msg, f"╭ Task By → 「{uname}」\n┊ Status   : Extrayendo imagen...\n╰ Mode     : #UniversalFallback\n\n{BOT_SIGNATURE}")
+                try:
+                    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"}
+                    async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as h:
+                        resp = await h.get(url, headers=headers)
+                        soup = BeautifulSoup(resp.text, "html.parser")
+                        # Busca las miniaturas estándar (OpenGraph, Twitter, Schema)
+                        meta_img = soup.find("meta", property="og:image") or soup.find("meta", attrs={"name": "twitter:image"}) or soup.find("meta", itemprop="image")
+                        
+                        if meta_img and meta_img.get("content"):
+                            img_url = meta_img["content"]
+                            img_path = os.path.join(DOWNLOAD_DIR, f"{task_id}_fallback.jpg")
+                            r = await h.get(img_url, headers=headers)
+                            with open(img_path, "wb") as f:
+                                f.write(r.content)
+                            files = [img_path]
+                            if soup.title and soup.title.string:
+                                video_title = soup.title.string.strip()
+                except Exception:
+                    pass
+            # ─────────────────────────────────────────────────────────────
+
+            if not files: raise Exception("No se pudo descargar. Posible bloqueo de IP, enlace privado o formato no soportado.")
 
             if len(files) > 1:
                 await safe_edit(msg, f"╭ Task By → 「{uname}」\n┊ Status   : Uploading album...\n╰ Files    : {len(files)}\n\n{BOT_SIGNATURE}")
