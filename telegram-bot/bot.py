@@ -37,7 +37,7 @@ MEGA_PASSWORD = os.environ.get("MEGA_PASSWORD", "")
 SOCIAL_USERNAME = os.environ.get("SOCIAL_USERNAME", "")
 SOCIAL_PASSWORD = os.environ.get("SOCIAL_PASSWORD", "")
 
-# Tu ID de Administrador
+# Tu ID de Owner (Dueño Absoluto)
 ADMIN_ID = 7815099965  
 AUTH_FILE = "authorized_users.json"
 
@@ -54,27 +54,41 @@ last_updates: dict = {}
 
 download_queue: asyncio.Queue = asyncio.Queue()
 
-BOT_SIGNATURE = "✪ Bot By → @The_canst & @Ryota_YT"
+# Firma actualizada según tu formato
+BOT_SIGNATURE = "✪ Bot By → @The_canst & @kaiser_yt"
 
 
-# ─── SISTEMA DE AUTORIZACIÓN PRIVADA ─────────────────────────────────────────
+# ─── SISTEMA DE AUTORIZACIÓN Y RANGOS ────────────────────────────────────────
+authorized_users = {}
+
 if os.path.exists(AUTH_FILE):
     with open(AUTH_FILE, "r") as f:
         try:
-            authorized_users = set(json.load(f))
+            data = json.load(f)
+            # Migración: Si el archivo antiguo era una lista de IDs, la convertimos al nuevo formato
+            if isinstance(data, list):
+                for uid in data:
+                    authorized_users[str(uid)] = {"role": "user", "username": "", "name": ""}
+            elif isinstance(data, dict):
+                authorized_users = data
         except Exception:
-            authorized_users = set()
-else:
-    authorized_users = set()
+            pass
 
 def save_auth_users():
-    """Guarda la lista de usuarios autorizados en el archivo JSON."""
+    """Guarda la base de datos de usuarios en el archivo JSON."""
     with open(AUTH_FILE, "w") as f:
-        json.dump(list(authorized_users), f)
+        json.dump(authorized_users, f)
 
 def is_auth(uid: int) -> bool:
-    """Verifica si un usuario es el Admin o está en la lista de autorizados."""
-    return uid == ADMIN_ID or uid in authorized_users
+    """Verifica si un usuario puede usar el bot (Owner, Admin o User)."""
+    return uid == ADMIN_ID or str(uid) in authorized_users
+
+def is_admin(uid: int) -> bool:
+    """Verifica si el usuario tiene privilegios administrativos."""
+    if uid == ADMIN_ID: 
+        return True
+    user_data = authorized_users.get(str(uid))
+    return user_data and user_data.get("role") == "admin"
 
 
 # ─── KEEP-ALIVE (Para Replit) ────────────────────────────────────────────────
@@ -220,11 +234,9 @@ def _mega_stringhash(s: str, aes_key: list) -> str:
 
 def _mega_parse_url(url: str):
     m = re.search(r'mega\.nz/file/([^#\s]+)#([^\s&]+)', url)
-    if m: 
-        return m.group(1), m.group(2)
+    if m: return m.group(1), m.group(2)
     m = re.search(r'mega\.nz/#!([^!\s]+)!([^\s&]+)', url)
-    if m: 
-        return m.group(1), m.group(2)
+    if m: return m.group(1), m.group(2)
     return None, None
 
 def _mega_decode_attrs(at_b64: str, aes_key_bytes: bytes) -> str:
@@ -233,16 +245,13 @@ def _mega_decode_attrs(at_b64: str, aes_key_bytes: bytes) -> str:
     plain = AES.new(aes_key_bytes, AES.MODE_CBC, iv=b'\x00' * 16).decrypt(raw)
     plain = plain.decode('utf-8', errors='ignore').rstrip('\x00')
     if plain.startswith('MEGA'):
-        try: 
-            return json.loads(plain[4:]).get('n', '')
-        except Exception: 
-            pass
+        try: return json.loads(plain[4:]).get('n', '')
+        except Exception: pass
     return ''
 
 async def _mega_api(payload: list, sid: str = '') -> list:
     params = {'id': 1}
-    if sid: 
-        params['sid'] = sid
+    if sid: params['sid'] = sid
     async with httpx.AsyncClient(timeout=30) as c:
         r = await c.post(_MEGA_API, params=params, json=payload)
     return r.json()
@@ -326,8 +335,7 @@ async def mega_download(url: str, dest_dir: str, task_id: str, progress_cb=None)
         
     dl_url = item.get('g')
     total  = item.get('s', 0)
-    if not dl_url: 
-        raise Exception("MEGA no devolvió URL de descarga.")
+    if not dl_url: raise Exception("MEGA no devolvió URL de descarga.")
         
     filename = _mega_decode_attrs(item.get('at', ''), aes_key_bytes) or f"mega_{handle}"
     dest_path = os.path.join(dest_dir, f"{task_id}_{filename}")
@@ -341,13 +349,11 @@ async def mega_download(url: str, dest_dir: str, task_id: str, progress_cb=None)
                 async for chunk in resp.aiter_bytes(_MEGA_CHUNK):
                     await asyncio.sleep(0)
                     orig_len = len(chunk)
-                    if orig_len % 16: 
-                        chunk += b'\x00' * (16 - orig_len % 16)
+                    if orig_len % 16: chunk += b'\x00' * (16 - orig_len % 16)
                     decrypted = cipher.decrypt(chunk)[:orig_len]
                     f.write(decrypted)
                     downloaded += orig_len
-                    if progress_cb and total > 0: 
-                        await progress_cb(downloaded, total)
+                    if progress_cb and total > 0: await progress_cb(downloaded, total)
 
     title = filename.rsplit('.', 1)[0] if '.' in filename else filename
     return dest_path, title
@@ -355,12 +361,9 @@ async def mega_download(url: str, dest_dir: str, task_id: str, progress_cb=None)
 
 # ─── PANELES DE PROGRESO ─────────────────────────────────────────────────────
 async def safe_edit(msg: Message, text: str):
-    try: 
-        await msg.edit_text(text, parse_mode=None)
-    except MessageNotModified: 
-        pass
-    except Exception: 
-        pass
+    try: await msg.edit_text(text, parse_mode=None)
+    except MessageNotModified: pass
+    except Exception: pass
 
 def download_panel(uname: str, percentage: float, status: str, done_bytes: int, total_bytes: int, 
                    speed_bps: float, elapsed: float, eta: float, engine: str, mode: str, task_id: str) -> str:
@@ -389,7 +392,7 @@ def encoding_panel(uname: str, percentage: float, done_bytes: int, total_bytes: 
         f"┊ Status   : Encoding\n"
         f"┊ Done     : {get_readable_size(done_bytes)}\n"
         f"┊ Total    : {get_readable_size(total_bytes)}\n"
-        f"┊ Speed    : {fps:.2f} fps\n"
+        f"┊ Speed    : {get_readable_size(speed_bps)}/s\n"
         f"┊ ETA      : {get_readable_time(eta)}\n"
         f"┊ Past     : {get_readable_time(elapsed)}\n"
         f"┊ Engine   : HandBrake\n"
@@ -459,12 +462,9 @@ async def upload_smart_file(client: Client, message: Message, path: str,
     display = title.strip() if title.strip() else fname
     lower = fname.lower()
     
-    if lower.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp")): 
-        icon = "🖼️"
-    elif lower.endswith((".mp3", ".m4a", ".wav", ".flac", ".ogg")): 
-        icon = "🎵"
-    else: 
-        icon = "🎬"
+    if lower.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp")): icon = "🖼️"
+    elif lower.endswith((".mp3", ".m4a", ".wav", ".flac", ".ogg")): icon = "🎵"
+    else: icon = "🎬"
         
     caption = f"{icon} <b>{display}</b>\n\n{BOT_SIGNATURE}"
     start_t = time.time()
@@ -575,20 +575,15 @@ async def encode_video(input_path: str, output_path: str, msg: Message, uname: s
                 return False
                 
             line_bytes = await proc.stdout.readline() 
-            if not line_bytes: 
-                break
+            if not line_bytes: break
                 
             line = line_bytes.decode().strip()
             if line.startswith("fps="):
-                try: 
-                    fps_val = float(line.split("=")[1])
-                except Exception: 
-                    pass
+                try: fps_val = float(line.split("=")[1])
+                except Exception: pass
             if line.startswith("out_time_ms="):
-                try: 
-                    time_done = int(line.split("=")[1]) / 1_000_000
-                except Exception: 
-                    pass
+                try: time_done = int(line.split("=")[1]) / 1_000_000
+                except Exception: pass
 
             now = time.time()
             if now - last_updates.get(task_id + "_enc", 0) >= 2:
@@ -600,11 +595,8 @@ async def encode_video(input_path: str, output_path: str, msg: Message, uname: s
                 await safe_edit(msg, panel)
                 
     except (asyncio.CancelledError, Exception):
-        try: 
-            proc.kill()
-            await proc.wait()
-        except Exception: 
-            pass
+        try: proc.kill(); await proc.wait()
+        except Exception: pass
         raise   
 
     await proc.wait()
@@ -614,7 +606,6 @@ async def encode_video(input_path: str, output_path: str, msg: Message, uname: s
 # ─── NÚCLEO DE DESCARGA ──────────────────────────────────────────────────────
 async def procesar_descarga(client: Client, message: Message, url: str, uname: str, uid: int, queue_label: str):
     
-    # Reemplazo de espejos conocidos
     mirrors = {
         "flashwish.com": "streamwish.com", "callistanise.com": "vidhide.com",
         "swishdesu.com": "streamwish.com", "filelions.com": "streamwish.com",
@@ -629,7 +620,6 @@ async def procesar_descarga(client: Client, message: Message, url: str, uname: s
     VIDEO_HOSTS = ["streamwish", "voe", "vidhide", "filemoon", "mixdrop", "mp4upload", "streamtape", "flashwish", "callistanise", "filelions", "swishdesu"]
     IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif")
 
-    # Banderas de identificación
     is_mega       = "mega.nz" in url
     is_mf         = "mediafire.com" in url
     is_tiktok     = "tiktok.com" in url.lower()
@@ -641,8 +631,7 @@ async def procesar_descarga(client: Client, message: Message, url: str, uname: s
     active_tasks[task_id] = "RUNNING"
 
     _current = asyncio.current_task()
-    if _current: 
-        _task_handles[task_id] = _current
+    if _current: _task_handles[task_id] = _current
 
     _stop_evt = threading.Event()
     _ydl_stop[task_id] = _stop_evt
@@ -662,31 +651,20 @@ async def procesar_descarga(client: Client, message: Message, url: str, uname: s
     try:
         # 1. ── MEGA ──
         if is_mega:
-            engine = "direct"
-            mode = "#MEGA"
-            start_t = time.time()
-            
+            engine, mode, start_t = "direct", "#MEGA", time.time()
             await safe_edit(msg, f"╭ Task By → 「{uname}」\n┊ [{make_bar(0)}] 0.00%\n┊ Status   : Connecting to MEGA...\n╰ Mode     : {mode}\n\n{BOT_SIGNATURE}")
-            
-            async def _mega_progress(curr, total):
-                await download_progress(curr, total, msg, start_t, uname, task_id, engine, mode)
-                
+            async def _mega_progress(curr, total): await download_progress(curr, total, msg, start_t, uname, task_id, engine, mode)
             path, video_title = await mega_download(url, DOWNLOAD_DIR, task_id, progress_cb=_mega_progress)
 
 
         # 2. ── MEDIAFIRE ──
         elif is_mf:
-            engine = "httpx"
-            mode = "#MediaFire"
-            
+            engine, mode = "httpx", "#MediaFire"
             async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as h:
                 r = await h.get(url)
                 soup = BeautifulSoup(r.text, "html.parser")
                 btn = soup.find("a", {"id": "downloadButton"})
-                
-                if not btn: 
-                    raise Exception("Mediafire: botón de descarga no encontrado.")
-                    
+                if not btn: raise Exception("Mediafire: botón de descarga no encontrado.")
                 d_link = btn.get("href")
                 filename = d_link.split("/")[-1].split("?")[0]
                 path = os.path.join(DOWNLOAD_DIR, filename)
@@ -699,8 +677,7 @@ async def procesar_descarga(client: Client, message: Message, url: str, uname: s
                         curr = 0
                         async for chunk in resp.aiter_bytes(chunk_size=1024*1024):
                             await asyncio.sleep(0)   
-                            if active_tasks.get(task_id) == "CANCELLED": 
-                                raise asyncio.CancelledError("USER_CANCELLED")
+                            if active_tasks.get(task_id) == "CANCELLED": raise asyncio.CancelledError("USER_CANCELLED")
                             f.write(chunk)
                             curr += len(chunk)
                             await download_progress(curr, total, msg, start_t, uname, task_id, engine, mode)
@@ -708,12 +685,9 @@ async def procesar_descarga(client: Client, message: Message, url: str, uname: s
 
         # 3. ── IMÁGENES DIRECTAS ──
         elif is_direct_img:
-            engine = "httpx"
-            mode = "#Image"
+            engine, mode = "httpx", "#Image"
             filename = url.split("/")[-1].split("?")[0]
-            if not filename or "." not in filename: 
-                filename = "image.jpg"
-                
+            if not filename or "." not in filename: filename = "image.jpg"
             path = os.path.join(DOWNLOAD_DIR, f"{task_id}_{filename}")
             video_title = filename
             start_t = time.time()
@@ -725,8 +699,7 @@ async def procesar_descarga(client: Client, message: Message, url: str, uname: s
                         curr = 0
                         async for chunk in resp.aiter_bytes(chunk_size=1024*1024):
                             await asyncio.sleep(0)
-                            if active_tasks.get(task_id) == "CANCELLED": 
-                                raise asyncio.CancelledError("USER_CANCELLED")
+                            if active_tasks.get(task_id) == "CANCELLED": raise asyncio.CancelledError("USER_CANCELLED")
                             f.write(chunk)
                             curr += len(chunk)
                             await download_progress(curr, total, msg, start_t, uname, task_id, engine, mode)
@@ -734,22 +707,12 @@ async def procesar_descarga(client: Client, message: Message, url: str, uname: s
 
         # 4. ── TIKTOK (TikWM API) ──
         elif is_tiktok:
-            engine = "TikWM API"
-            mode = "#TikTok"
-            start_t = time.time()
-            
-            await safe_edit(msg,
-                f"╭ Task By → 「{uname}」\n"
-                f"┊ [{make_bar(0)}] 0.00%\n"
-                f"┊ Status   : Conectando a TikTok API...\n"
-                f"╰ Mode     : {mode}\n\n"
-                f"{BOT_SIGNATURE}"
-            )
+            engine, mode, start_t = "TikWM API", "#TikTok", time.time()
+            await safe_edit(msg, f"╭ Task By → 「{uname}」\n┊ [{make_bar(0)}] 0.00%\n┊ Status   : Conectando a TikTok API...\n╰ Mode     : {mode}\n\n{BOT_SIGNATURE}")
             
             api_req = f"https://www.tikwm.com/api/?url={url}&hd=1"
             async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as h:
-                resp = await h.get(api_req)
-                tk_data = resp.json()
+                tk_data = (await h.get(api_req)).json()
             
             if tk_data.get("code") == 0:
                 data_obj = tk_data.get("data", {})
@@ -757,25 +720,14 @@ async def procesar_descarga(client: Client, message: Message, url: str, uname: s
                 images = data_obj.get("images")
                 video_url = data_obj.get("hdplay") or data_obj.get("play")
                 
-                # Manejo de carrusel de fotos
                 if images and isinstance(images, list):
-                    await safe_edit(msg,
-                        f"╭ Task By → 「{uname}」\n"
-                        f"┊ Status   : Descargando álbum de fotos...\n"
-                        f"╰ Mode     : {mode}\n\n"
-                        f"{BOT_SIGNATURE}"
-                    )
-                    
+                    await safe_edit(msg, f"╭ Task By → 「{uname}」\n┊ Status   : Descargando álbum de fotos...\n╰ Mode     : {mode}\n\n{BOT_SIGNATURE}")
                     files = []
                     for idx, img_url in enumerate(images):
-                        if active_tasks.get(task_id) == "CANCELLED": 
-                            raise asyncio.CancelledError("USER_CANCELLED")
-                            
+                        if active_tasks.get(task_id) == "CANCELLED": raise asyncio.CancelledError("USER_CANCELLED")
                         img_path = os.path.join(DOWNLOAD_DIR, f"{task_id}_{idx}.jpg")
                         async with httpx.AsyncClient() as h:
-                            r = await h.get(img_url)
-                            with open(img_path, "wb") as f:
-                                f.write(r.content)
+                            with open(img_path, "wb") as f: f.write((await h.get(img_url)).content)
                         files.append(img_path)
                     
                     from pyrogram.types import InputMediaPhoto
@@ -787,16 +739,13 @@ async def procesar_descarga(client: Client, message: Message, url: str, uname: s
                         group.append(InputMediaPhoto(f, caption=cap, parse_mode=enums.ParseMode.HTML))
                     
                     if group:
-                        for i in range(0, len(group), 10):
-                            await client.send_media_group(message.chat.id, group[i:i+10])
+                        for i in range(0, len(group), 10): await client.send_media_group(message.chat.id, group[i:i+10])
                     await msg.delete()
-                    
                     for f in files:
                         try: os.remove(f)
-                        except Exception: pass
+                        except: pass
                     return  
                     
-                # Manejo de video estándar de TikTok
                 elif video_url:
                     path = os.path.join(DOWNLOAD_DIR, f"{task_id}.mp4")
                     async with httpx.AsyncClient(timeout=120.0) as h:
@@ -805,15 +754,12 @@ async def procesar_descarga(client: Client, message: Message, url: str, uname: s
                             with open(path, "wb") as f:
                                 curr = 0
                                 async for chunk in r.aiter_bytes(chunk_size=1024*1024):
-                                    if active_tasks.get(task_id) == "CANCELLED": 
-                                        raise asyncio.CancelledError("USER_CANCELLED")
+                                    if active_tasks.get(task_id) == "CANCELLED": raise asyncio.CancelledError("USER_CANCELLED")
                                     f.write(chunk)
                                     curr += len(chunk)
                                     await download_progress(curr, total, msg, start_t, uname, task_id, engine, mode)
-                else:
-                    raise Exception("La API de TikTok no devolvió contenido multimedia.")
-            else:
-                raise Exception("Fallo en la extracción del enlace de TikTok.")
+                else: raise Exception("La API de TikTok no devolvió contenido multimedia.")
+            else: raise Exception("Fallo en la extracción del enlace de TikTok.")
 
 
         # 5. ── REDES SOCIALES y HOSTS DE VIDEO (yt-dlp) ──
@@ -826,55 +772,40 @@ async def procesar_descarga(client: Client, message: Message, url: str, uname: s
             def ydl_hook(d):
                 if _stop_evt.is_set() or active_tasks.get(task_id) == "CANCELLED": 
                     raise ValueError("USER_CANCELLED")
-                    
                 if d["status"] == "downloading":
                     curr  = d.get("downloaded_bytes", 0)
                     total = d.get("total_bytes") or d.get("total_bytes_estimate", 0)
                     if total > 0:
-                        asyncio.run_coroutine_threadsafe(
-                            download_progress(curr, total, msg, start_t, uname, task_id, engine, mode), loop
-                        )
+                        asyncio.run_coroutine_threadsafe(download_progress(curr, total, msg, start_t, uname, task_id, engine, mode), loop)
 
             captured = {"title": ""}
 
             def run_ydl():
                 base_opts = {
                     "outtmpl": f"{DOWNLOAD_DIR}{task_id}_%(playlist_index)s%(title)s.%(ext)s",
-                    "noplaylist": False, 
-                    "progress_hooks": [ydl_hook], 
-                    "quiet": True, 
-                    "no_warnings": True,
+                    "noplaylist": False, "progress_hooks": [ydl_hook], "quiet": True, "no_warnings": True,
                 }
                 
-                # INYECTAR CREDENCIALES DE INICIO DE SESIÓN
                 if SOCIAL_USERNAME and SOCIAL_PASSWORD:
                     base_opts["username"] = SOCIAL_USERNAME
                     base_opts["password"] = SOCIAL_PASSWORD
 
                 if is_video_host:
                     base_opts["format"] = "best"
-                    base_opts["http_headers"] = {
-                        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
-                        "Referer": url,
-                    }
+                    base_opts["http_headers"] = {"User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"), "Referer": url}
                 else:
                     base_opts["format"] = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
                     
-                if os.path.exists("cookies.txt"): 
-                    base_opts["cookiefile"] = "cookies.txt"
+                if os.path.exists("cookies.txt"): base_opts["cookiefile"] = "cookies.txt"
 
                 def _extract(opts):
                     with yt_dlp.YoutubeDL(opts) as ydl:
                         info = ydl.extract_info(url, download=True)
-                        if info: 
-                            captured["title"] = (info.get("title", "") or info.get("webpage_url_basename", ""))
+                        if info: captured["title"] = (info.get("title", "") or info.get("webpage_url_basename", ""))
                             
-                try:
-                    _extract(base_opts)
+                try: _extract(base_opts)
                 except Exception as _e:
-                    if "USER_CANCELLED" in str(_e) or isinstance(_e, ValueError): 
-                        raise asyncio.CancelledError("USER_CANCELLED")
-                    # Reintento sin forzar formato (útil si es audio o una estructura extraña)
+                    if "USER_CANCELLED" in str(_e) or isinstance(_e, ValueError): raise asyncio.CancelledError("USER_CANCELLED")
                     fallback = dict(base_opts)
                     fallback.pop("format", None)
                     _extract(fallback)
@@ -885,74 +816,48 @@ async def procesar_descarga(client: Client, message: Message, url: str, uname: s
 
             files = sorted(glob.glob(f"{DOWNLOAD_DIR}{task_id}_*"), key=os.path.getsize)
             
-            
-            # 6. ── FALLBACK UNIVERSAL PARA IMÁGENES (PINTEREST, BLOGS, ETC) ──
+            # 6. ── FALLBACK UNIVERSAL (PINTEREST / OG:IMAGE) ──
             if not files:
                 await safe_edit(msg, f"╭ Task By → 「{uname}」\n┊ Status   : Buscando Imagen de Respaldo...\n╰ Mode     : #UniversalFallback\n\n{BOT_SIGNATURE}")
                 try:
-                    # Nos hacemos pasar por el robot rastreador de Google para saltar bloqueos web
                     headers = {"User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"}
                     async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as h:
                         resp = await h.get(url, headers=headers)
                         soup = BeautifulSoup(resp.text, "html.parser")
-                        
-                        # Buscar la miniatura OpenGraph principal
                         meta_img = soup.find("meta", property="og:image") or soup.find("meta", attrs={"name": "twitter:image"})
-                        
                         if meta_img and meta_img.get("content"):
                             img_url = meta_img["content"]
-                            
-                            # Parche especial para Pinterest: forzar calidad "/originals/"
-                            if "pinimg.com" in img_url: 
-                                img_url = re.sub(r'/(236x|474x|736x)/', '/originals/', img_url) 
-                                
+                            if "pinimg.com" in img_url: img_url = re.sub(r'/(236x|474x|736x)/', '/originals/', img_url) 
                             img_path = os.path.join(DOWNLOAD_DIR, f"{task_id}_fallback.jpg")
                             r = await h.get(img_url, headers=headers)
-                            with open(img_path, "wb") as f: 
-                                f.write(r.content)
-                                
+                            with open(img_path, "wb") as f: f.write(r.content)
                             files = [img_path]
-                            if soup.title: 
-                                video_title = soup.title.string.strip()
-                except Exception:
-                    pass
-            # ─────────────────────────────────────────────────────────────────
+                            if soup.title: video_title = soup.title.string.strip()
+                except Exception: pass
 
-            if not files: 
-                raise Exception("No se pudo descargar. Posible bloqueo de IP, enlace privado o formato no soportado.")
+            if not files: raise Exception("No se pudo descargar. Posible bloqueo de IP, enlace privado o formato no soportado.")
 
-            # Subir múltiples archivos (álbum / playlist)
             if len(files) > 1:
                 await safe_edit(msg, f"╭ Task By → 「{uname}」\n┊ Status   : Uploading album...\n╰ Files    : {len(files)}\n\n{BOT_SIGNATURE}")
                 from pyrogram.types import InputMediaPhoto, InputMediaVideo, InputMediaDocument
-                
                 album_caption = f"🖼️ <b>{video_title}</b>\n\n{BOT_SIGNATURE}" if video_title else BOT_SIGNATURE
                 group = []
                 for idx, f in enumerate(files):
                     fl = f.lower()
                     cap = album_caption if idx == 0 else None
                     parse = enums.ParseMode.HTML if cap else None
-                    
-                    if fl.endswith((".jpg", ".jpeg", ".png", ".webp", ".bmp")): 
-                        group.append(InputMediaPhoto(f, caption=cap, parse_mode=parse))
-                    elif fl.endswith((".mp4", ".mkv", ".webm", ".avi", ".mov")): 
-                        group.append(InputMediaVideo(f, caption=cap, parse_mode=parse, supports_streaming=True))
-                    elif fl.endswith(".gif"): 
-                        group.append(InputMediaDocument(f, caption=cap, parse_mode=parse))
-                        
+                    if fl.endswith((".jpg", ".jpeg", ".png", ".webp", ".bmp")): group.append(InputMediaPhoto(f, caption=cap, parse_mode=parse))
+                    elif fl.endswith((".mp4", ".mkv", ".webm", ".avi", ".mov")): group.append(InputMediaVideo(f, caption=cap, parse_mode=parse, supports_streaming=True))
+                    elif fl.endswith(".gif"): group.append(InputMediaDocument(f, caption=cap, parse_mode=parse))
                 if group:
-                    for i in range(0, len(group), 10):
-                        await client.send_media_group(message.chat.id, group[i:i+10])
+                    for i in range(0, len(group), 10): await client.send_media_group(message.chat.id, group[i:i+10])
                 await msg.delete()
-                
-                for f in files: 
-                    os.remove(f)
+                for f in files: os.remove(f)
                 return
             else:
                 path = files[0]
 
-        else:
-            raise Exception("Enlace no soportado por el sistema.")
+        else: raise Exception("Enlace no soportado por el sistema.")
 
         # ── CODIFICACIÓN DE VIDEO OBLIGATORIA ──
         encoded_path = None
@@ -963,19 +868,14 @@ async def procesar_descarga(client: Client, message: Message, url: str, uname: s
                 is_h264 = info["codec"] == "h264"
                 is_aac  = info["audio_codec"] in ("aac", "mp3", "mp4a")
 
-                if is_h264 and is_aac and lower_path.endswith(".mp4"):
-                    pass 
-                else:
+                if not (is_h264 and is_aac and lower_path.endswith(".mp4")):
                     encoded_path = path + "_out.mp4"
                     await safe_edit(msg, encoding_panel(uname, 0, 0, os.path.getsize(path), 0, 0, 0, task_id))
-                    ok = await encode_video(path, encoded_path, msg, uname, task_id)
-                    
-                    if ok and os.path.exists(encoded_path):
+                    if await encode_video(path, encoded_path, msg, uname, task_id) and os.path.exists(encoded_path):
                         os.remove(path)
                         path = encoded_path
                     else:
-                        if encoded_path and os.path.exists(encoded_path): 
-                            os.remove(encoded_path)
+                        if encoded_path and os.path.exists(encoded_path): os.remove(encoded_path)
                         encoded_path = None
 
         # ── SUBIDA A TELEGRAM ──
@@ -983,53 +883,36 @@ async def procesar_descarga(client: Client, message: Message, url: str, uname: s
             start_up = time.time()
             await safe_edit(msg, upload_panel(uname, 0, 0, os.path.getsize(path), 0, 0, 0, task_id))
             await upload_smart_file(client, message, path, msg, uname, task_id, title=video_title)
-            try: 
-                await msg.delete()
-            except Exception: 
-                pass
+            try: await msg.delete()
+            except Exception: pass
 
     except (Exception, asyncio.CancelledError) as e:
         is_cancel = isinstance(e, asyncio.CancelledError) or "USER_CANCELLED" in str(e)
         err = "🛑 Tarea cancelada exitosamente." if is_cancel else f"❌ Error: {str(e)[:200]}"
-        try: 
-            await safe_edit(msg, f"╭ Task By → 「{uname}」\n┊ {err}\n╰──────────────\n\n{BOT_SIGNATURE}")
-        except Exception: 
-            pass
+        try: await safe_edit(msg, f"╭ Task By → 「{uname}」\n┊ {err}\n╰──────────────\n\n{BOT_SIGNATURE}")
+        except Exception: pass
             
     finally:
-        active_tasks.pop(task_id, None)
-        _task_handles.pop(task_id, None)
-        _ydl_stop.pop(task_id, None)
-        
-        # Limpiar keys de actualización para no saturar la memoria
+        active_tasks.pop(task_id, None); _task_handles.pop(task_id, None); _ydl_stop.pop(task_id, None)
         keys_to_delete = [k for k in last_updates.keys() if k.startswith(task_id)]
-        for k in keys_to_delete:
-            last_updates.pop(k, None)
-            
-        # Limpiar los archivos del disco
+        for k in keys_to_delete: last_updates.pop(k, None)
         for f in glob.glob(f"{DOWNLOAD_DIR}{task_id}_*"):
-            try: 
-                os.remove(f)
-            except Exception: 
-                pass
-                
+            try: os.remove(f)
+            except: pass
         for p in [path, encoded_path]:
             if p and os.path.exists(p):
-                try: 
-                    os.remove(p)
-                except Exception: 
-                    pass
+                try: os.remove(p)
+                except: pass
         gc.collect()
 
 
-# ─── COLA DE TRABAJO (QUEUE WORKER) ──────────────────────────────────────────
+# ─── COLA DE TRABAJO ─────────────────────────────────────────────────────────
 async def queue_worker():
     while True:
         client, message, url, uname, uid, label = await download_queue.get()
         try:
-            dl_task = asyncio.create_task(procesar_descarga(client, message, url, uname, uid, label))
-            await dl_task
-        except (Exception, asyncio.CancelledError) as e:
+            await asyncio.create_task(procesar_descarga(client, message, url, uname, uid, label))
+        except Exception as e:
             print(f"[worker] error: {e}")
         finally:
             download_queue.task_done()
@@ -1039,45 +922,35 @@ async def queue_worker():
 bot = Client("bot_session", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workdir="/tmp")
 
 
-# ─── COMANDOS ADMINISTRATIVOS ────────────────────────────────────────────────
-@bot.on_message(filters.command("id") & filters.reply)
-async def cmd_auth_user(client: Client, message: Message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    
-    target = message.reply_to_message.from_user
-    if target:
-        authorized_users.add(target.id)
-        save_auth_users()
-        await message.reply_text(
-            f"✅ **Acceso concedido.**\n"
-            f"El usuario [{target.first_name}](tg://user?id={target.id}) (`{target.id}`) ahora puede usar el bot."
-        )
-
-@bot.on_message(filters.command(["Removeid", "removeid"]) & filters.reply)
-async def cmd_remove_auth(client: Client, message: Message):
-    if message.from_user.id != ADMIN_ID:
+# ─── COMANDOS DE PANEL Y ESTADO ──────────────────────────────────────────────
+@bot.on_message(filters.command("coms"))
+async def cmd_coms(client: Client, message: Message):
+    if not is_auth(message.from_user.id):
         return
         
-    target = message.reply_to_message.from_user
-    if target:
-        if target.id in authorized_users:
-            authorized_users.remove(target.id)
-            save_auth_users()
-            await message.reply_text(
-                f"❌ **Acceso revocado.**\n"
-                f"El usuario [{target.first_name}](tg://user?id={target.id}) (`{target.id}`) ya no tiene permiso para usar el bot."
-            )
-        else:
-            await message.reply_text("⚠️ Ese usuario no estaba en la lista de autorizados.")
+    text = (
+        "📋 Comandos disponibles:\n\n"
+        "🔓 Para todos los usuarios autorizados:\n"
+        "• Envía un link de YouTube, TikTok o Mediafire\n"
+        "• /start — Iniciar el bot\n"
+        "• /cancel — Cancelar descarga activa\n\n"
+        "🔐 Solo administradores:\n"
+        "• /id  — Autorizar a un usuario\n"
+        "• /users — Ver usuarios autorizados\n"
+        "• /stat — Ver estadísticas del servidor\n"
+        "• /reset — Reiniciar el bot\n"
+        "• /admin — Dar rango admin (responde un mensaje)\n"
+        "• /remadmin — Quitar rango admin (responde un mensaje)\n"
+        "• /cancelarID — Quitar autorización (responde un mensaje)\n"
+        "• /coms — Ver esta lista de comandos\n\n"
+        f"{BOT_SIGNATURE}"
+    )
+    await message.reply_text(text)
 
-
-# ─── COMANDOS DE INTERFAZ Y ESTADO ───────────────────────────────────────────
 @bot.on_message(filters.command("start"))
 async def cmd_start(client: Client, message: Message):
     uid = message.from_user.id
     name = message.from_user.first_name
-    
     auth_status = "✅ Autorizado" if is_auth(uid) else "⛔ No Autorizado"
     
     await message.reply_text(
@@ -1091,54 +964,9 @@ async def cmd_start(client: Client, message: Message):
         f"{BOT_SIGNATURE}"
     )
 
-@bot.on_message(filters.command("coms"))
-async def cmd_coms(client: Client, message: Message):
-    if not is_auth(message.from_user.id):
-        await message.reply_text("⛔ No tienes permisos para ver los comandos.")
-        return
-        
-    text = (
-        "🛠️ **Lista de Comandos del Bot**\n\n"
-        "👥 **Para Usuarios Autorizados:**\n"
-        "• `/start` - Inicia el bot y muestra tu estado.\n"
-        "• `/coms` - Muestra esta lista de comandos.\n"
-        "• `/cancel_ID` - Cancela una tarea en progreso.\n\n"
-    )
-    
-    if message.from_user.id == ADMIN_ID:
-        text += (
-            "👑 **Para Administradores:**\n"
-            "• `/id` - *(Respondiendo)* Autoriza a un usuario.\n"
-            "• `/Removeid` - *(Respondiendo)* Revoca el acceso a un usuario.\n"
-            "• `/stat` - Muestra el estado del servidor (RAM, CPU, etc).\n"
-            "• `/reset` - Borra la caché, cancela tareas y reinicia los hilos.\n"
-        )
-        
-    text += f"\n{BOT_SIGNATURE}"
-    await message.reply_text(text)
-
-@bot.on_message(filters.regex(r"^/cancel_([0-9]+_[0-9]+)"))
-async def cmd_cancel(client: Client, message: Message):
-    if not is_auth(message.from_user.id):
-        return
-        
-    task_id = message.matches[0].group(1)
-    if task_id in active_tasks:
-        active_tasks[task_id] = "CANCELLED"
-        if task_id in _ydl_stop: 
-            _ydl_stop[task_id].set()
-            
-        task_handle = _task_handles.get(task_id)
-        if task_handle and not task_handle.done(): 
-            task_handle.cancel()
-            
-        await message.reply_text("🛑 Deteniendo proceso de inmediato...")
-    else:
-        await message.reply_text("⚠️ No hay ninguna tarea activa con ese ID (o ya fue completada/cancelada).")
-
 @bot.on_message(filters.command(["stat", "Stat", "STAT"]))
 async def cmd_stat(client: Client, message: Message):
-    if message.from_user.id != ADMIN_ID:
+    if not is_auth(message.from_user.id):
         return
         
     uptime  = get_readable_time(time.time() - start_time)
@@ -1161,9 +989,124 @@ async def cmd_stat(client: Client, message: Message):
         f"{BOT_SIGNATURE}"
     )
 
+# ─── CANCELACIONES ───────────────────────────────────────────────────────────
+# Cancelar tarea por ID (uso interno de los botones en línea)
+@bot.on_message(filters.regex(r"^/cancel_([0-9]+_[0-9]+)"))
+async def cmd_cancel_id(client: Client, message: Message):
+    if not is_auth(message.from_user.id):
+        return
+        
+    task_id = message.matches[0].group(1)
+    if task_id in active_tasks:
+        active_tasks[task_id] = "CANCELLED"
+        if task_id in _ydl_stop: _ydl_stop[task_id].set()
+        if _task_handles.get(task_id) and not _task_handles[task_id].done(): _task_handles[task_id].cancel()
+        await message.reply_text("🛑 Deteniendo proceso de inmediato...")
+    else:
+        await message.reply_text("⚠️ No hay ninguna tarea activa con ese ID.")
+
+# Cancelar tarea de manera global para el usuario
+@bot.on_message(filters.command(["cancel", "cancelar"]))
+async def cmd_cancel_global(client: Client, message: Message):
+    uid = message.from_user.id
+    if not is_auth(uid): return
+    
+    canceled_any = False
+    for tid in list(active_tasks.keys()):
+        if tid.startswith(f"{uid}_"):
+            active_tasks[tid] = "CANCELLED"
+            if tid in _ydl_stop: _ydl_stop[tid].set()
+            if _task_handles.get(tid) and not _task_handles[tid].done(): _task_handles[tid].cancel()
+            canceled_any = True
+            
+    if canceled_any:
+        await message.reply_text("🛑 Todas tus descargas han sido canceladas.")
+    else:
+        await message.reply_text("⚠️ No tienes tareas activas en este momento.")
+
+
+# ─── COMANDOS ADMINISTRATIVOS AVANZADOS ──────────────────────────────────────
+@bot.on_message(filters.command("id") & filters.reply)
+async def cmd_auth_user(client: Client, message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    
+    target = message.reply_to_message.from_user
+    if target:
+        authorized_users[str(target.id)] = {
+            "role": "user",
+            "username": target.username or "",
+            "name": target.first_name or ""
+        }
+        save_auth_users()
+        await message.reply_text(
+            f"✅ **Acceso concedido.**\n"
+            f"El usuario [{target.first_name}](tg://user?id={target.id}) (`{target.id}`) ahora puede usar el bot."
+        )
+
+@bot.on_message(filters.command(["cancelarID", "cancelarid", "Removeid", "removeid"]) & filters.reply)
+async def cmd_remove_auth(client: Client, message: Message):
+    if not is_admin(message.from_user.id):
+        return
+        
+    target = message.reply_to_message.from_user
+    if target and str(target.id) in authorized_users:
+        del authorized_users[str(target.id)]
+        save_auth_users()
+        await message.reply_text(
+            f"❌ **Acceso revocado.**\n"
+            f"El usuario [{target.first_name}](tg://user?id={target.id}) (`{target.id}`) ya no tiene permiso para usar el bot."
+        )
+
+@bot.on_message(filters.command("admin") & filters.reply)
+async def cmd_set_admin(client: Client, message: Message):
+    if not is_admin(message.from_user.id):
+        return
+        
+    target = message.reply_to_message.from_user
+    if target:
+        # Lo autoriza y le da rango admin a la vez
+        authorized_users[str(target.id)] = {
+            "role": "admin",
+            "username": target.username or "",
+            "name": target.first_name or ""
+        }
+        save_auth_users()
+        await message.reply_text(f"🛡 **Rango Admin otorgado** a [{target.first_name}](tg://user?id={target.id}).")
+
+@bot.on_message(filters.command("remadmin") & filters.reply)
+async def cmd_rem_admin(client: Client, message: Message):
+    if not is_admin(message.from_user.id):
+        return
+        
+    target = message.reply_to_message.from_user
+    if target and str(target.id) in authorized_users:
+        authorized_users[str(target.id)]["role"] = "user"
+        save_auth_users()
+        await message.reply_text(f"👤 **Rango Admin retirado** a [{target.first_name}](tg://user?id={target.id}). Ahora es un usuario normal.")
+
+@bot.on_message(filters.command("users"))
+async def cmd_users(client: Client, message: Message):
+    if not is_admin(message.from_user.id):
+        return
+        
+    text = "╭─ Usuarios autorizados\n┊ 👑 Owners : @The_canst, @Ryota_YT\n"
+    count = 1
+    
+    for str_uid, info in authorized_users.items():
+        role_icon = " 🛡 admin" if info.get("role") == "admin" else ""
+        username = info.get("username")
+        display_name = f"@{username}" if username else f"id:{str_uid}"
+        
+        text += f"┊ {count}. {display_name} ({str_uid}){role_icon}\n"
+        count += 1
+        
+    text += f"╰─ Total : {count - 1}\n\n{BOT_SIGNATURE}"
+    await message.reply_text(text)
+
 @bot.on_message(filters.command(["reset", "Reset", "RESET"]))
 async def cmd_reset(client: Client, message: Message):
-    if message.from_user.id != ADMIN_ID:
+    if not is_admin(message.from_user.id):
         return
         
     msg = await message.reply_text("♻️ Reiniciando...")
@@ -1195,7 +1138,7 @@ async def cmd_reset(client: Client, message: Message):
 
 
 # ─── RECEPTOR DE ENLACES PRINCIPAL ───────────────────────────────────────────
-@bot.on_message(filters.text & ~filters.command(["start", "stat", "Stat", "STAT", "reset", "Reset", "RESET", "id", "Removeid", "removeid", "coms"]) & ~filters.regex(r"^/cancel_"))
+@bot.on_message(filters.text & ~filters.command(["start", "stat", "Stat", "STAT", "reset", "Reset", "RESET", "id", "Removeid", "removeid", "cancelarID", "cancelarid", "coms", "cancel", "cancelar", "admin", "remadmin", "users"]) & ~filters.regex(r"^/cancel_"))
 async def handle_links(client: Client, message: Message):
     uid = message.from_user.id
     
