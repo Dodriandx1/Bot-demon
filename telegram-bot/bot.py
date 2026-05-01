@@ -392,7 +392,7 @@ def encoding_panel(uname: str, percentage: float, done_bytes: int, total_bytes: 
         f"┊ Status   : Encoding\n"
         f"┊ Done     : {get_readable_size(done_bytes)}\n"
         f"┊ Total    : {get_readable_size(total_bytes)}\n"
-        f"┊ Speed    : {get_readable_size(speed_bps)}/s\n"
+        f"┊ Speed    : {fps:.2f} fps\n"
         f"┊ ETA      : {get_readable_time(eta)}\n"
         f"┊ Past     : {get_readable_time(elapsed)}\n"
         f"┊ Engine   : HandBrake\n"
